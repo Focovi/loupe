@@ -344,14 +344,14 @@ function renderTerminalSummary(run, confirmedRecommendations, reportPath) {
     const cat = run.categories[letter];
     const delta = run.deltas ? run.deltas.perCategory[letter] : null;
     const arrow = delta ? deltaArrow(delta.direction) : '';
-    lines.push(`  ${letter} ${CATEGORY_LABELS[letter].padEnd(16)} ${cat.grade} (${cat.score}) ${arrow}`);
+    lines.push(`  ${CATEGORY_LABELS[letter].padEnd(17)} ${cat.grade} (${cat.score}) ${arrow}`);
   }
 
   if (run.deltas && run.deltas.regressions.length > 0) {
     lines.push('');
     lines.push('⚠ Regression (2+ letter grade drop):');
     for (const r of run.deltas.regressions) {
-      lines.push(`  ${r.category} ${CATEGORY_LABELS[r.category]}: ${r.from} → ${r.to}`);
+      lines.push(`  ${CATEGORY_LABELS[r.category]}: ${r.from} → ${r.to}`);
     }
   }
 
@@ -362,7 +362,7 @@ function renderTerminalSummary(run, confirmedRecommendations, reportPath) {
   } else {
     lines.push(`Top recommendations (${ranked.length}):`);
     for (const rec of ranked) {
-      lines.push(`  [${rec.category}] ${firstSentence(rec.recommendation)}`);
+      lines.push(`  (${CATEGORY_LABELS[rec.category]}) ${firstSentence(rec.recommendation)}`);
     }
   }
 
@@ -482,7 +482,7 @@ function renderHeader(run) {
 function renderRegressionBanner(run) {
   if (!run.deltas || run.deltas.regressions.length === 0) return '';
   const items = run.deltas.regressions
-    .map((r) => `<li><strong>${escapeHtml(r.category)} ${escapeHtml(CATEGORY_LABELS[r.category])}</strong>: ${escapeHtml(r.from)} → ${escapeHtml(r.to)}</li>`)
+    .map((r) => `<li><strong>${escapeHtml(CATEGORY_LABELS[r.category])}</strong>: ${escapeHtml(r.from)} → ${escapeHtml(r.to)}</li>`)
     .join('');
   return `<div class="banner banner-critical">
   <strong>Regression flagged.</strong> The following categories dropped 2 or more letter grades since the last run:
@@ -508,7 +508,7 @@ function renderCategoryRow(letter, run, allRuns, isLinkable) {
   const delta = run.deltas ? run.deltas.perCategory[letter] : null;
   const deltaLabel = delta ? `${deltaArrow(delta.direction)} ${delta.previousGrade} → ${delta.currentGrade}` : 'first run';
   const scoreHistory = allRuns.map((r) => r.categories[letter].score);
-  const label = `${escapeHtml(letter)} ${escapeHtml(CATEGORY_LABELS[letter])}`;
+  const label = `<span class="category-swatch swatch-${escapeHtml(letter)}"></span>${escapeHtml(CATEGORY_LABELS[letter])}`;
   const categoryCell = isLinkable ? `<a class="category-link" href="#rec-${escapeHtml(letter)}">${label}</a>` : label;
   return `<tr>
     <td>${categoryCell}</td>
@@ -554,7 +554,7 @@ function renderRecommendationsSection(grouped) {
 function renderCategoryGroup(group) {
   const cards = group.items.map(renderRecommendationCard).join('');
   return `<div class="category-group" id="rec-${escapeHtml(group.letter)}">
-  <h3 class="category-group-title">${escapeHtml(group.letter)} ${escapeHtml(CATEGORY_LABELS[group.letter])}</h3>
+  <h3 class="category-group-title"><span class="category-swatch swatch-${escapeHtml(group.letter)}"></span>${escapeHtml(CATEGORY_LABELS[group.letter])}</h3>
   ${cards}
 </div>`;
 }
@@ -567,7 +567,6 @@ function renderRecommendationCard(rec) {
     .join('');
   return `<article class="rec-card">
   <div class="rec-header">
-    <span class="grade-pill grade-cat-${escapeHtml(rec.category)}">${escapeHtml(rec.category)}</span>
     ${affirmingTag}
     ${dialTags}
   </div>
@@ -670,13 +669,14 @@ p { margin: 0.4rem 0; }
 .grade-pill.grade-C { background: var(--status-warning); color: #2b2200; }
 .grade-pill.grade-D { background: var(--status-serious); }
 .grade-pill.grade-F { background: var(--status-critical); }
-.grade-pill.grade-cat-A { background: var(--series-1); }
-.grade-pill.grade-cat-B { background: var(--series-2); }
-.grade-pill.grade-cat-C { background: var(--series-3); color: #2b2200; }
-.grade-pill.grade-cat-D { background: var(--series-4); }
-.grade-pill.grade-cat-E { background: var(--series-5); }
-.grade-pill.grade-cat-F { background: var(--series-6); }
-.grade-pill.grade-cat-G { background: var(--series-7); }
+.category-swatch { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin-right: 0.5rem; vertical-align: middle; }
+.swatch-A { background: var(--series-1); }
+.swatch-B { background: var(--series-2); }
+.swatch-C { background: var(--series-3); }
+.swatch-D { background: var(--series-4); }
+.swatch-E { background: var(--series-5); }
+.swatch-F { background: var(--series-6); }
+.swatch-G { background: var(--series-7); }
 .sparkline { vertical-align: middle; margin-right: 0.5rem; }
 .sparkline-line { fill: none; stroke: var(--text-muted); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .sparkline-dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
