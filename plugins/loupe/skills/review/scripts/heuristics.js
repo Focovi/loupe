@@ -51,9 +51,13 @@ const REAL_MODEL_NAME_PATTERN = /claude/i;
 // Same-tool/different-target runs are a coarse, over-inclusive proxy for
 // "independent work chunks" — pure tool-call structure can't distinguish
 // genuinely independent audits from a sequential grep/find chain that
-// converges on one answer. This threshold trades recall for precision
-// deliberately; true independence judgment is deferred to grade.sh (§3).
-const INDEPENDENT_RUN_MIN_LENGTH = 4;
+// converges on one answer. True independence judgment is deferred to
+// grade.sh (§3); isCleanIndependentRun() below screens out the specific
+// failure pattern Phase 6 validation actually observed (revisited
+// targets), which lets this match §2's own example length (3: "audit file
+// A, then file B, then file C") instead of padding the threshold to
+// compensate for a weaker filter.
+const INDEPENDENT_RUN_MIN_LENGTH = 3;
 
 const CORRECTION_PATTERN = /\b(no+,|don'?t|never|always|instead|stop doing|actually,? (please|just)?|please stop|that'?s wrong|not like that)\b/i;
 const HOOK_REQUEST_PATTERN = /\b(run (the )?(lint|tests?|typecheck|format(ter)?)|please (lint|format|test)|check for [a-z ]+ tells?|run tsc)\b/i;
@@ -614,20 +618,37 @@ function detectAgentParallelismCandidates(groupedSessions) {
 
 function countIndependentSerialChunks(session) {
   const toolCalls = flattenToolCalls(session);
-  let independentChunkCount = 0;
-  let runLength = 1;
+  const runs = findSameToolDifferentTargetRuns(toolCalls);
+  return runs.filter((run) => isCleanIndependentRun(run, toolCalls)).length;
+}
+
+function findSameToolDifferentTargetRuns(toolCalls) {
+  if (toolCalls.length === 0) return [];
+  const runs = [];
+  let currentRun = [toolCalls[0]];
 
   for (let i = 1; i < toolCalls.length; i++) {
     if (isSameToolDifferentTarget(toolCalls[i - 1], toolCalls[i])) {
-      runLength++;
+      currentRun.push(toolCalls[i]);
       continue;
     }
-    if (runLength >= INDEPENDENT_RUN_MIN_LENGTH) independentChunkCount++;
-    runLength = 1;
+    if (currentRun.length >= INDEPENDENT_RUN_MIN_LENGTH) runs.push(currentRun);
+    currentRun = [toolCalls[i]];
   }
-  if (runLength >= INDEPENDENT_RUN_MIN_LENGTH) independentChunkCount++;
+  if (currentRun.length >= INDEPENDENT_RUN_MIN_LENGTH) runs.push(currentRun);
+  return runs;
+}
 
-  return independentChunkCount;
+// Phase 6 validation: every real F candidate graded got rejected, and the
+// common thread was a target getting touched again later in the session —
+// a shared debug loop mutating one config file, a design-review edit
+// sequence revisited after a build check. Genuinely independent, one-shot
+// work doesn't need revisiting. This can't prove independence (heuristics
+// alone can't, per §2), but it directly screens out the failure pattern
+// grading actually observed, trading recall for precision on purpose.
+function isCleanIndependentRun(run, allToolCalls) {
+  const runTargets = new Set(run.map((call) => call.target));
+  return !allToolCalls.some((call) => !run.includes(call) && runTargets.has(call.target));
 }
 
 function flattenToolCalls(session) {

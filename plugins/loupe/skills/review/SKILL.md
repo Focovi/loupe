@@ -13,9 +13,22 @@ design; this file implements §3's orchestration.
 
 All script paths below are relative to `${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/`.
 
+## Reporting progress (read this before Step 1)
+
+A full run makes up to 20 real, sequential `claude -p` calls in Step 4, each
+taking anywhere from 15 seconds to over a minute. **Nothing about this skill
+is fast, and none of it streams on its own** — a Bash tool call's output
+only appears once that call finishes, so if you silently run the steps below
+back to back, the user sees nothing happen for several minutes and has no
+way to tell a real run apart from a hang. Narrate as you go: a one-line text
+message (not a tool call) before each numbered step below, and — this is the
+important one — **a one-line update after every single grading call in Step
+4**, not just at the end of the batch. Treat silence during Step 4 as a bug.
+
 ## Steps
 
-1. **Self-tag this run before anything else.** Run:
+1. **Self-tag this run before anything else.** Tell the user you're starting
+   a review. Run:
    ```
    node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/heuristics.js" --mark-self "$CLAUDE_CODE_SESSION_ID"
    ```
@@ -23,7 +36,8 @@ All script paths below are relative to `${CLAUDE_PLUGIN_ROOT}/skills/review/scri
    as data in the *next* review run — tag it first so it never grades
    itself (§3, "self-referential exclusion").
 
-2. **Run the heuristic pre-filtering pass.** Run:
+2. **Run the heuristic pre-filtering pass.** Tell the user you're scanning
+   session history. Run:
    ```
    node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/heuristics.js"
    ```
@@ -31,7 +45,10 @@ All script paths below are relative to `${CLAUDE_PLUGIN_ROOT}/skills/review/scri
    `A_guidelines` through `G_sessionHygiene`, each an array of candidate
    clusters. These are cheap structural pre-filters, not final
    recommendations — some will get rejected in the next step once an LLM
-   actually looks at the evidence, and that's expected, not a bug.
+   actually looks at the evidence, and that's expected, not a bug. Report
+   the totals to the user now (e.g. "Scanned N sessions, found M candidate
+   clusters across 7 categories") so they see something concrete before the
+   slow part starts.
 
 3. **Flatten candidates into a grading queue.** Build a list of
    `{categoryLetter, cluster}` pairs from every array in `candidates`
@@ -49,29 +66,36 @@ All script paths below are relative to `${CLAUDE_PLUGIN_ROOT}/skills/review/scri
    candidates are the most worth a grading call — and tell the user in
    the terminal summary how many were skipped and why.
 
-4. **Grade each queued cluster.** For each `{categoryLetter, cluster}`
-   pair, run:
+4. **Grade each queued cluster, narrating as you go.** This step is the
+   entire wall-clock cost of a run, so it's the one place silence reads as
+   broken. Before starting, tell the user how many clusters are queued
+   ("Grading 14 candidates, this takes a few minutes..."). Then for each
+   `{categoryLetter, cluster}` pair, in order:
    ```
    echo '<cluster JSON>' | "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/grade.sh" <categoryLetter>
    ```
-   `grade.sh` shells out to a pinned model in headless mode (§3) so grading
-   consistency never depends on whichever model happened to invoke this
-   skill. It prints one graded recommendation JSON on success. Two non-fatal
-   outcomes are expected and should not stop the run:
+   and **immediately after that call returns, before starting the next
+   one**, post a single short line: `[i/total] <category label>:
+   accepted` / `rejected (<short reason>)` / `error`. That line is a plain
+   text message, not a tool call, so the user actually sees it appear
+   between calls instead of after a long gap. Two non-fatal outcomes are
+   expected and should not stop the run:
    - The graded response has `"recommendation": null` with a
      `rejected_reason` — the LLM looked at the actual evidence and decided
-     the heuristic was wrong. Drop it, but keep the reason around in case
-     the terminal summary wants to mention how many were screened out this
-     way.
+     the heuristic was wrong. Drop it, but keep the reason around for the
+     progress line above and in case the terminal summary wants to mention
+     how many were screened out this way.
    - `grade.sh` exits non-zero (a `claude -p` failure or a malformed model
-     response) — log it and continue with the rest of the queue. One bad
-     grading call should never abort the whole run.
+     response) — log it, say so in the progress line, and continue with the
+     rest of the queue. One bad grading call should never abort the whole
+     run.
 
 5. **Collect the results.** Gather every successfully graded, non-rejected
    recommendation into a single list. Each has
    `{category, evidence_session_ids, recommendation, proposed_artifact, apply_prompt}`.
 
-6. **Score the run and build the report.** Write step 2's heuristics
+6. **Score the run and build the report.** Tell the user you're scoring the
+   run and building the report. Write step 2's heuristics
    output to a temp file and step 5's collected recommendations (the full
    graded array, including rejected ones — `report.js` uses rejection
    counts too) to another temp file, then run:
