@@ -31,6 +31,9 @@ const DEVELOPER_DIR_NAME = 'Developer';
 const LOUPE_SCRIPTS_PATH_FRAGMENT = path.join('skills', 'review', 'scripts');
 
 const DUMP_SCHEMA_LINE_COUNT = 8;
+const DIGEST_MAX_TURNS = 80;
+const DIGEST_TEXT_TRUNCATE_CHARS = 300;
+const DIGEST_TOOL_ARG_TRUNCATE_CHARS = 150;
 const SHORT_TURN_MAX_CHARS = 200;
 const MIN_CLUSTER_SIZE = 2;
 // Calibrated against real paraphrased corrections ("use grafana not axiom"
@@ -72,6 +75,13 @@ function main() {
     return;
   }
 
+  const digestIndex = args.indexOf('--digest');
+  if (digestIndex !== -1) {
+    const sessionIds = (args[digestIndex + 1] || '').split(',').filter(Boolean);
+    printDigest(sessionIds);
+    return;
+  }
+
   const result = runHeuristicPass();
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
 }
@@ -95,6 +105,76 @@ function dumpSchema() {
     }
   });
   process.stdout.write(JSON.stringify({ file: files[0], lines: parsed }, null, 2) + '\n');
+}
+
+// ---------------------------------------------------------------------------
+// Condensed digest for the grading pass (§3): "user turns, tool_use
+// names/args (not full outputs), model used, session length" — never full
+// tool outputs, to keep grading calls cheap.
+// ---------------------------------------------------------------------------
+
+function printDigest(sessionIds) {
+  const wanted = new Set(sessionIds);
+  const files = discoverTranscriptFiles();
+  const digests = [];
+
+  for (const file of files) {
+    if (digests.length === wanted.size) break;
+    const session = safeParseTranscriptFile(file);
+    if (!session || !wanted.has(session.sessionId)) continue;
+    digests.push(buildSessionDigest(session));
+  }
+
+  process.stdout.write(JSON.stringify({ sessions: digests }, null, 2) + '\n');
+}
+
+function safeParseTranscriptFile(filePath) {
+  try {
+    return parseTranscriptFile(filePath);
+  } catch (err) {
+    return null;
+  }
+}
+
+function buildSessionDigest(session) {
+  const relevantTurns = session.turns.filter((t) => isHumanTypedTurn(t) || t.type === 'assistant');
+  const sampledTurns = sampleHeadAndTail(relevantTurns, DIGEST_MAX_TURNS);
+
+  // Interleaved, in order, with per-turn model attribution — a flattened
+  // "humanTurns" + "toolUses" split (the original design) loses turn order
+  // and can't tell the grading pass which model handled which task, which
+  // is exactly what category E (model routing) needs to judge anything.
+  const turns = sampledTurns.map((turn) => ({
+    role: turn.type === 'assistant' ? 'assistant' : 'human',
+    model: turn.type === 'assistant' ? turn.model : undefined,
+    text: turn.text ? truncate(turn.text, DIGEST_TEXT_TRUNCATE_CHARS) : undefined,
+    toolUses: turn.toolUses.length
+      ? turn.toolUses.map((tu) => ({ name: tu.name, args: truncate(JSON.stringify(tu.input || {}), DIGEST_TOOL_ARG_TRUNCATE_CHARS) }))
+      : undefined,
+  }));
+
+  const modelsUsed = [...new Set(session.turns.filter((t) => t.model && REAL_MODEL_NAME_PATTERN.test(t.model)).map((t) => t.model))];
+
+  return {
+    sessionId: session.sessionId,
+    cwd: session.cwd,
+    gitBranch: session.gitBranch,
+    turnCount: session.turns.length,
+    turnsIncludedInDigest: sampledTurns.length,
+    modelsUsed,
+    turns,
+  };
+}
+
+function sampleHeadAndTail(items, maxItems) {
+  if (items.length <= maxItems) return items;
+  const halfSize = Math.floor(maxItems / 2);
+  return [...items.slice(0, halfSize), ...items.slice(-halfSize)];
+}
+
+function truncate(text, maxChars) {
+  if (typeof text !== 'string') return text;
+  return text.length > maxChars ? text.slice(0, maxChars) + '…' : text;
 }
 
 // ---------------------------------------------------------------------------
