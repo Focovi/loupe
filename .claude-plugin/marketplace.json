@@ -1,0 +1,7 @@
+{
+  "name": "loupe",
+  "owner": { "name": "Michael Ison" },
+  "plugins": [
+    { "name": "loupe", "source": "./plugins/loupe", "description": "Claude Code usage advisor" }
+  ]
+}
