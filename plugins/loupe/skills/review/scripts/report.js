@@ -495,7 +495,7 @@ function renderCategoryTable(run, allRuns, grouped) {
   const rows = Object.keys(CATEGORY_KEYS).map((letter) => renderCategoryRow(letter, run, allRuns, hasContent.has(letter))).join('');
   return `<section>
   <h2>Grade breakdown</h2>
-  <p class="meta">Click a category to jump to its recommendations.</p>
+  <p class="meta">Categories with confirmed recommendations link to them below; grayed-out swatches had none this run.</p>
   <table class="grade-table">
     <thead><tr><th>Category</th><th>Grade</th><th>Score</th><th>Trend</th><th>Confirmed</th></tr></thead>
     <tbody>${rows}</tbody>
@@ -508,8 +508,11 @@ function renderCategoryRow(letter, run, allRuns, isLinkable) {
   const delta = run.deltas ? run.deltas.perCategory[letter] : null;
   const deltaLabel = delta ? `${deltaArrow(delta.direction)} ${delta.previousGrade} → ${delta.currentGrade}` : 'first run';
   const scoreHistory = allRuns.map((r) => r.categories[letter].score);
-  const label = `<span class="category-swatch swatch-${escapeHtml(letter)}"></span>${escapeHtml(CATEGORY_LABELS[letter])}`;
-  const categoryCell = isLinkable ? `<a class="category-link" href="#rec-${escapeHtml(letter)}">${label}</a>` : label;
+  const swatchClass = isLinkable ? `swatch-${escapeHtml(letter)}` : 'swatch-empty';
+  const label = `<span class="category-swatch ${swatchClass}"></span>${escapeHtml(CATEGORY_LABELS[letter])}`;
+  const categoryCell = isLinkable
+    ? `<a class="category-link" href="#rec-${escapeHtml(letter)}">${label}</a>`
+    : `<span class="category-empty" title="No confirmed recommendations this run">${label}</span>`;
   return `<tr>
     <td>${categoryCell}</td>
     <td><span class="grade-pill grade-${cat.grade}">${escapeHtml(cat.grade)}</span></td>
@@ -681,8 +684,10 @@ p { margin: 0.4rem 0; }
 .sparkline-line { fill: none; stroke: var(--text-muted); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .sparkline-dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
 .delta-label { font-size: 0.82rem; color: var(--text-secondary); vertical-align: middle; }
-.category-link { color: var(--text-primary); text-decoration: none; border-bottom: 1px dashed var(--text-muted); }
+.category-link { color: var(--text-primary); text-decoration: none; border-bottom: 1px dashed var(--text-muted); cursor: pointer; }
 .category-link:hover { border-bottom-style: solid; }
+.category-empty { color: var(--text-muted); cursor: default; }
+.swatch-empty { background: transparent; border: 1px solid var(--text-muted); }
 .category-group { margin-top: 1.5rem; scroll-margin-top: 1rem; }
 .category-group-title {
   font-size: 1rem; color: var(--text-primary); text-transform: none; letter-spacing: normal;
