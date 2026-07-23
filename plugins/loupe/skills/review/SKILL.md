@@ -41,6 +41,20 @@ important one — **a one-line update after every single grading call in Step
    ```
    node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/heuristics.js"
    ```
+   By default this is **incremental** — if a prior run exists in
+   `~/.loupe/runs/`, only sessions active since that run's timestamp get
+   analyzed, so a second review is fast and cheap instead of re-grading
+   everything from scratch. The output's `incremental` and `reviewedSince`
+   fields tell you which mode ran; `sessionsSkippedAlreadyReviewed` says how
+   many were skipped as already covered. If the result comes back with
+   `sessionsAnalyzed: 0` because everything is already covered, tell the
+   user that plainly ("nothing new since your last review on \<date\>")
+   instead of running an empty grading pass. Pass `--full` instead to force
+   a full re-scan — do this if the user explicitly asks for a full history
+   review, or if `~/.loupe/excluded-sessions.json` was ever reset (a full
+   scan is the only way to re-derive self-referential exclusions from
+   scratch in that case).
+
    Capture the JSON it prints — it has a `candidates` object keyed
    `A_guidelines` through `G_sessionHygiene`, each an array of candidate
    clusters. These are cheap structural pre-filters, not final
