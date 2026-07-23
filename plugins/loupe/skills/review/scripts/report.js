@@ -75,8 +75,7 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   const candidates = readJson(args.candidates);
   const gradedRecommendations = args.graded ? readJson(args.graded) : [];
-  const profileName = args.profile || readDefaultProfileName();
-  const dialWeights = PRESET_PROFILES[profileName] || PRESET_PROFILES[DEFAULT_PROFILE_NAME];
+  const { profileName, dialWeights } = resolveProfile(args);
 
   const run = buildRun({ candidates, gradedRecommendations, profileName, dialWeights });
   const previousRun = loadMostRecentRun();
@@ -91,6 +90,61 @@ function main() {
   const confirmedRecommendations = gradedRecommendations.filter((r) => r.recommendation);
   const reportPath = writeHtmlReport(run, confirmedRecommendations);
   process.stdout.write(renderTerminalSummary(run, confirmedRecommendations, reportPath));
+}
+
+// §3.5 precedence, highest first: --optimize (explicit for this run) >
+// nearest .loupe.json walking up from cwd (per-repo default) >
+// ~/.loupe/config.json (personal default) > built-in "balanced".
+function resolveProfile(args) {
+  if (args.optimize) {
+    return { profileName: 'custom', dialWeights: parseCustomWeights(args.optimize) };
+  }
+  if (args.profile && PRESET_PROFILES[args.profile]) {
+    return { profileName: args.profile, dialWeights: PRESET_PROFILES[args.profile] };
+  }
+
+  const repoProfile = readNearestRepoProfile(args.cwd || process.cwd());
+  const profileName = repoProfile || readDefaultProfileName();
+  return { profileName, dialWeights: PRESET_PROFILES[profileName] || PRESET_PROFILES[DEFAULT_PROFILE_NAME] };
+}
+
+function parseCustomWeights(optimizeArg) {
+  const weights = {};
+  for (const pair of optimizeArg.split(',')) {
+    const [dial, value] = pair.split('=');
+    if (dial && value !== undefined) weights[dial.trim()] = Number(value);
+  }
+  return normalizeWeights({
+    cost: weights.cost || 0,
+    speed: weights.speed || 0,
+    quality: weights.quality || 0,
+    interaction: weights.interaction || 0,
+  });
+}
+
+function normalizeWeights(weights) {
+  const total = Object.values(weights).reduce((sum, w) => sum + w, 0);
+  if (total <= 0) return PRESET_PROFILES[DEFAULT_PROFILE_NAME];
+  return Object.fromEntries(Object.entries(weights).map(([dial, w]) => [dial, w / total]));
+}
+
+function readNearestRepoProfile(startDir) {
+  let dir = startDir;
+  while (true) {
+    const config = readJsonSafe(path.join(dir, '.loupe.json'));
+    if (config) return config.profile || null;
+    const parentDir = path.dirname(dir);
+    if (parentDir === dir || dir === HOME_DIR) return null;
+    dir = parentDir;
+  }
+}
+
+function readJsonSafe(filePath) {
+  try {
+    return readJson(filePath);
+  } catch (err) {
+    return null;
+  }
 }
 
 function parseArgs(argv) {
@@ -302,7 +356,7 @@ function renderTerminalSummary(run, confirmedRecommendations, reportPath) {
   }
 
   lines.push('');
-  const ranked = rankRecommendations(confirmedRecommendations).slice(0, TERMINAL_SUMMARY_MAX_RECOMMENDATIONS);
+  const ranked = rankRecommendations(confirmedRecommendations, run.dialWeights).slice(0, TERMINAL_SUMMARY_MAX_RECOMMENDATIONS);
   if (ranked.length === 0) {
     lines.push('No confirmed recommendations this run.');
   } else {
@@ -323,15 +377,24 @@ function deltaArrow(direction) {
   return '';
 }
 
-function rankRecommendations(confirmedRecommendations) {
+function rankRecommendations(confirmedRecommendations, dialWeights) {
   // §4.1: ranked by (frequency of the underlying pattern × estimated
   // friction). No direct friction measure is available from the grading
-  // output, so evidence-session count is used as the proxy for both —
-  // a pattern grounded in more sessions is both more frequent and (all
-  // else equal) more likely to be worth the reader's attention.
-  return [...confirmedRecommendations].sort(
-    (a, b) => (b.evidence_session_ids || []).length - (a.evidence_session_ids || []).length
-  );
+  // output, so evidence-session count is used as the proxy for frequency.
+  // §3.5: "the terminal summary ranking actually changes when you switch
+  // profiles" — so frequency alone isn't enough; a recommendation also
+  // ranks higher when its category serves the active profile's dials more
+  // (via the same CATEGORY_DIAL_RELEVANCE weighting the composite score
+  // uses), so a cost-weighted profile surfaces different top recommendations
+  // than a quality-weighted one even on identical underlying data.
+  return [...confirmedRecommendations].sort((a, b) => rankScore(b, dialWeights) - rankScore(a, dialWeights));
+}
+
+function rankScore(recommendation, dialWeights) {
+  const frequency = (recommendation.evidence_session_ids || []).length;
+  const relevance = CATEGORY_DIAL_RELEVANCE[recommendation.category];
+  const profileFit = relevance ? dotProduct(dialWeights, relevance) : 1;
+  return frequency * profileFit;
 }
 
 function firstSentence(text) {
@@ -352,6 +415,17 @@ function writeHtmlReport(run, confirmedRecommendations) {
   return reportPath;
 }
 
+const DIAL_LABELS = { cost: 'Cost', speed: 'Speed', quality: 'Quality', interaction: 'Interaction' };
+const DIAL_TAGS_PER_CATEGORY = 2;
+
+function topDialsForCategory(letter) {
+  const relevance = CATEGORY_DIAL_RELEVANCE[letter];
+  return Object.entries(relevance)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, DIAL_TAGS_PER_CATEGORY)
+    .map(([dial]) => dial);
+}
+
 function loadAllRuns() {
   if (!fs.existsSync(RUNS_DIR)) return [];
   return fs.readdirSync(RUNS_DIR)
@@ -361,7 +435,7 @@ function loadAllRuns() {
 }
 
 function renderHtmlReport(run, confirmedRecommendations, allRuns) {
-  const grouped = groupRecommendationsByCategory(confirmedRecommendations);
+  const grouped = groupRecommendationsByCategory(confirmedRecommendations, run.dialWeights);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -374,8 +448,7 @@ function renderHtmlReport(run, confirmedRecommendations, allRuns) {
 <main>
 ${renderHeader(run)}
 ${renderRegressionBanner(run)}
-${renderCategoryTable(run, allRuns)}
-${renderQuickNav(grouped)}
+${renderCategoryTable(run, allRuns, grouped)}
 ${renderRecommendationsSection(grouped)}
 </main>
 <script>${REPORT_JS}</script>
@@ -383,8 +456,8 @@ ${renderRecommendationsSection(grouped)}
 </html>`;
 }
 
-function groupRecommendationsByCategory(confirmedRecommendations) {
-  const ranked = rankRecommendations(confirmedRecommendations);
+function groupRecommendationsByCategory(confirmedRecommendations, dialWeights) {
+  const ranked = rankRecommendations(confirmedRecommendations, dialWeights);
   const groups = [];
   for (const letter of Object.keys(CATEGORY_KEYS)) {
     const items = ranked.filter((r) => r.category === letter);
@@ -393,20 +466,15 @@ function groupRecommendationsByCategory(confirmedRecommendations) {
   return groups;
 }
 
-function renderQuickNav(grouped) {
-  if (grouped.length === 0) return '';
-  const links = grouped
-    .map((g) => `<a href="#rec-${escapeHtml(g.letter)}">${escapeHtml(g.letter)} ${escapeHtml(CATEGORY_LABELS[g.letter])} (${g.items.length})</a>`)
-    .join('');
-  return `<nav class="quick-nav">${links}</nav>`;
-}
-
 function renderHeader(run) {
+  const weights = Object.entries(run.dialWeights)
+    .map(([dial, w]) => `${DIAL_LABELS[dial]} ${Math.round(w * 100)}%`)
+    .join(', ');
   return `<header class="report-header">
   <div class="composite-badge grade-${run.compositeGrade}">${escapeHtml(run.compositeGrade)}</div>
   <div>
     <h1>Loupe review</h1>
-    <p class="meta">Composite score ${run.compositeScore}/100 &middot; profile "${escapeHtml(run.profile)}" &middot; ${run.sessionsAnalyzed} sessions analyzed &middot; ${escapeHtml(formatTimestamp(run.generatedAt))}</p>
+    <p class="meta">Composite score ${run.compositeScore}/100 &middot; profile "${escapeHtml(run.profile)}" (${escapeHtml(weights)}) &middot; ${run.sessionsAnalyzed} sessions analyzed &middot; ${escapeHtml(formatTimestamp(run.generatedAt))}</p>
   </div>
 </header>`;
 }
@@ -422,10 +490,12 @@ function renderRegressionBanner(run) {
 </div>`;
 }
 
-function renderCategoryTable(run, allRuns) {
-  const rows = Object.keys(CATEGORY_KEYS).map((letter) => renderCategoryRow(letter, run, allRuns)).join('');
+function renderCategoryTable(run, allRuns, grouped) {
+  const hasContent = new Set(grouped.map((g) => g.letter));
+  const rows = Object.keys(CATEGORY_KEYS).map((letter) => renderCategoryRow(letter, run, allRuns, hasContent.has(letter))).join('');
   return `<section>
   <h2>Grade breakdown</h2>
+  <p class="meta">Click a category to jump to its recommendations.</p>
   <table class="grade-table">
     <thead><tr><th>Category</th><th>Grade</th><th>Score</th><th>Trend</th><th>Confirmed</th></tr></thead>
     <tbody>${rows}</tbody>
@@ -433,13 +503,15 @@ function renderCategoryTable(run, allRuns) {
 </section>`;
 }
 
-function renderCategoryRow(letter, run, allRuns) {
+function renderCategoryRow(letter, run, allRuns, isLinkable) {
   const cat = run.categories[letter];
   const delta = run.deltas ? run.deltas.perCategory[letter] : null;
   const deltaLabel = delta ? `${deltaArrow(delta.direction)} ${delta.previousGrade} → ${delta.currentGrade}` : 'first run';
   const scoreHistory = allRuns.map((r) => r.categories[letter].score);
+  const label = `${escapeHtml(letter)} ${escapeHtml(CATEGORY_LABELS[letter])}`;
+  const categoryCell = isLinkable ? `<a class="category-link" href="#rec-${escapeHtml(letter)}">${label}</a>` : label;
   return `<tr>
-    <td>${escapeHtml(letter)} ${escapeHtml(CATEGORY_LABELS[letter])}</td>
+    <td>${categoryCell}</td>
     <td><span class="grade-pill grade-${cat.grade}">${escapeHtml(cat.grade)}</span></td>
     <td>${cat.score}</td>
     <td>${renderSparkline(scoreHistory)}<span class="delta-label">${escapeHtml(deltaLabel)}</span></td>
@@ -490,10 +562,14 @@ function renderCategoryGroup(group) {
 function renderRecommendationCard(rec) {
   const evidenceIds = (rec.evidence_session_ids || []).map((id) => `<code>${escapeHtml(id)}</code>`).join(', ');
   const affirmingTag = rec.is_gap === false ? '<span class="tag tag-good">working well, codify it</span>' : '';
+  const dialTags = topDialsForCategory(rec.category)
+    .map((dial) => `<span class="tag tag-dial">${escapeHtml(DIAL_LABELS[dial])}</span>`)
+    .join('');
   return `<article class="rec-card">
   <div class="rec-header">
     <span class="grade-pill grade-cat-${escapeHtml(rec.category)}">${escapeHtml(rec.category)}</span>
     ${affirmingTag}
+    ${dialTags}
   </div>
   <p class="rec-text">${escapeHtml(rec.recommendation)}</p>
   <details class="artifact-details">
@@ -605,13 +681,9 @@ p { margin: 0.4rem 0; }
 .sparkline-line { fill: none; stroke: var(--text-muted); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .sparkline-dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
 .delta-label { font-size: 0.82rem; color: var(--text-secondary); vertical-align: middle; }
-.quick-nav { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.25rem; }
-.quick-nav a {
-  font-size: 0.8rem; color: var(--text-secondary); text-decoration: none;
-  border: 1px solid var(--border); border-radius: 999px; padding: 0.25rem 0.65rem;
-}
-.quick-nav a:hover { color: var(--text-primary); border-color: var(--text-secondary); }
-.category-group { margin-top: 1.5rem; }
+.category-link { color: var(--text-primary); text-decoration: none; border-bottom: 1px dashed var(--text-muted); }
+.category-link:hover { border-bottom-style: solid; }
+.category-group { margin-top: 1.5rem; scroll-margin-top: 1rem; }
 .category-group-title {
   font-size: 1rem; color: var(--text-primary); text-transform: none; letter-spacing: normal;
   padding-top: 0.6rem; margin-top: 0; border-top: 2px solid var(--gridline);
@@ -619,6 +691,7 @@ p { margin: 0.4rem 0; }
 .rec-card { border: 1px solid var(--border); border-radius: 10px; padding: 0.85rem 1.1rem; margin-bottom: 0.75rem; background: var(--surface-1); }
 .rec-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
 .tag { font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 999px; background: color-mix(in srgb, var(--status-good) 16%, var(--surface-1)); color: var(--status-good); }
+.tag-dial { background: var(--page-plane); color: var(--text-secondary); border: 1px solid var(--border); }
 .rec-text { font-size: 0.93rem; }
 .artifact-details { margin-top: 0.5rem; }
 .artifact-details summary {
