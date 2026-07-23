@@ -406,20 +406,30 @@ function clusterBySimilarity(items, getWords) {
 // ---------------------------------------------------------------------------
 
 function detectGuidelineCandidates(groupedSessions) {
+  return detectRecurringTurnPatternCandidates(groupedSessions, (turn) => {
+    if (turn.text.length > SHORT_TURN_MAX_CHARS) return false;
+    return CORRECTION_PATTERN.test(turn.text);
+  });
+}
+
+// Shared by categories A and C: both look for short human turns matching a
+// regex, then cluster the matches by text similarity to find a *recurring*
+// pattern rather than a one-off.
+function detectRecurringTurnPatternCandidates(groupedSessions, turnMatches) {
   const clusters = [];
 
   for (const [groupName, sessions] of groupedSessions) {
-    const correctionTurns = [];
+    const matchedTurns = [];
     for (const session of sessions) {
-      for (const turn of session.turns) {
+      for (let i = 0; i < session.turns.length; i++) {
+        const turn = session.turns[i];
         if (!isHumanTypedTurn(turn)) continue;
-        if (turn.text.length > SHORT_TURN_MAX_CHARS) continue;
-        if (!CORRECTION_PATTERN.test(turn.text)) continue;
-        correctionTurns.push({ sessionId: session.sessionId, text: turn.text.trim() });
+        if (!turnMatches(turn, session, i)) continue;
+        matchedTurns.push({ sessionId: session.sessionId, text: turn.text.trim() });
       }
     }
 
-    const textClusters = clusterBySimilarity(correctionTurns, (item) => normalizeForSimilarity(item.text));
+    const textClusters = clusterBySimilarity(matchedTurns, (item) => normalizeForSimilarity(item.text));
     for (const cluster of textClusters) {
       clusters.push({
         group: groupName,
@@ -476,32 +486,10 @@ function buildToolSequenceSignature(session) {
 // ---------------------------------------------------------------------------
 
 function detectHookCandidates(groupedSessions) {
-  const clusters = [];
-
-  for (const [groupName, sessions] of groupedSessions) {
-    const requestTurns = [];
-    for (const session of sessions) {
-      for (let i = 0; i < session.turns.length; i++) {
-        const turn = session.turns[i];
-        if (!isHumanTypedTurn(turn)) continue;
-        if (!HOOK_REQUEST_PATTERN.test(turn.text)) continue;
-        if (!followsFileEditTool(session.turns, i)) continue;
-        requestTurns.push({ sessionId: session.sessionId, text: turn.text.trim() });
-      }
-    }
-
-    const textClusters = clusterBySimilarity(requestTurns, (item) => normalizeForSimilarity(item.text));
-    for (const cluster of textClusters) {
-      clusters.push({
-        group: groupName,
-        representativeText: cluster[0].text,
-        occurrenceCount: cluster.length,
-        evidenceSessionIds: [...new Set(cluster.map((c) => c.sessionId))],
-      });
-    }
-  }
-
-  return clusters;
+  return detectRecurringTurnPatternCandidates(groupedSessions, (turn, session, index) => {
+    if (!HOOK_REQUEST_PATTERN.test(turn.text)) return false;
+    return followsFileEditTool(session.turns, index);
+  });
 }
 
 function followsFileEditTool(turns, currentIndex) {
@@ -519,40 +507,35 @@ function followsFileEditTool(turns, currentIndex) {
 
 function detectMcpCandidates(groupedSessions) {
   const clusters = [];
-
   for (const [groupName, sessions] of groupedSessions) {
-    const repoPath = sessions.find((s) => s.cwd)?.cwd;
-    const configuredServers = repoPath ? readConfiguredMcpServers(repoPath) : [];
-    const usedServers = collectUsedMcpServers(sessions);
+    clusters.push(...detectUnusedMcpServers(groupName, sessions));
+    clusters.push(...detectManualWorkGap(groupName, sessions));
+  }
+  return clusters;
+}
 
-    const unusedServers = configuredServers.filter((serverName) => !usedServers.has(serverName));
-    if (unusedServers.length > 0) {
-      clusters.push({
-        group: groupName,
-        signal: 'underuse',
-        unusedServers,
-        evidenceSessionIds: sessions.map((s) => s.sessionId),
-      });
-    }
+function detectUnusedMcpServers(groupName, sessions) {
+  const repoPath = sessions.find((s) => s.cwd)?.cwd;
+  const configuredServers = repoPath ? readConfiguredMcpServers(repoPath) : [];
+  const usedServers = collectUsedMcpServers(sessions);
+  const unusedServers = configuredServers.filter((serverName) => !usedServers.has(serverName));
 
-    const manualWorkTurns = [];
-    for (const session of sessions) {
-      for (const turn of session.turns) {
-        if (isHumanTypedTurn(turn) && MANUAL_WORK_PATTERN.test(turn.text)) {
-          manualWorkTurns.push(session.sessionId);
-        }
+  if (unusedServers.length === 0) return [];
+  return [{ group: groupName, signal: 'underuse', unusedServers, evidenceSessionIds: sessions.map((s) => s.sessionId) }];
+}
+
+function detectManualWorkGap(groupName, sessions) {
+  const manualWorkSessionIds = [];
+  for (const session of sessions) {
+    for (const turn of session.turns) {
+      if (isHumanTypedTurn(turn) && MANUAL_WORK_PATTERN.test(turn.text)) {
+        manualWorkSessionIds.push(session.sessionId);
       }
-    }
-    if (manualWorkTurns.length >= MIN_CLUSTER_SIZE) {
-      clusters.push({
-        group: groupName,
-        signal: 'gap',
-        evidenceSessionIds: [...new Set(manualWorkTurns)],
-      });
     }
   }
 
-  return clusters;
+  if (manualWorkSessionIds.length < MIN_CLUSTER_SIZE) return [];
+  return [{ group: groupName, signal: 'gap', evidenceSessionIds: [...new Set(manualWorkSessionIds)] }];
 }
 
 function readConfiguredMcpServers(repoPath) {
@@ -720,14 +703,30 @@ function correctionRate(turns) {
 // ---------------------------------------------------------------------------
 
 function runHeuristicPass() {
-  const files = discoverTranscriptFiles();
   const excludedSessionIds = loadExcludedSessionIds();
+  const { sessions: allSessions, skippedFiles, newlyExcluded } = loadAnalyzableSessions(excludedSessionIds);
+  persistNewlyDetectedSelfSessions(newlyExcluded);
 
-  const allSessions = [];
+  const { groups, wasGenerated } = loadOrSuggestGroups(allSessions);
+  const groupedSessions = assignSessionsToGroups(allSessions, groups);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    sessionsAnalyzed: allSessions.length,
+    sessionsExcludedSelfReferential: newlyExcluded.length,
+    filesSkipped: skippedFiles,
+    groupsWereAutoGenerated: wasGenerated,
+    groupCount: groupedSessions.size,
+    candidates: detectAllCategoryCandidates(groupedSessions),
+  };
+}
+
+function loadAnalyzableSessions(excludedSessionIds) {
+  const sessions = [];
   const skippedFiles = [];
   const newlyExcluded = [];
 
-  for (const file of files) {
+  for (const file of discoverTranscriptFiles()) {
     let session;
     try {
       session = parseTranscriptFile(file);
@@ -744,30 +743,21 @@ function runHeuristicPass() {
       newlyExcluded.push(session.sessionId);
       continue;
     }
-    allSessions.push(session);
+    sessions.push(session);
   }
 
-  persistNewlyDetectedSelfSessions(newlyExcluded);
+  return { sessions, skippedFiles, newlyExcluded };
+}
 
-  const { groups, wasGenerated } = loadOrSuggestGroups(allSessions);
-  const groupedSessions = assignSessionsToGroups(allSessions, groups);
-
+function detectAllCategoryCandidates(groupedSessions) {
   return {
-    generatedAt: new Date().toISOString(),
-    sessionsAnalyzed: allSessions.length,
-    sessionsExcludedSelfReferential: newlyExcluded.length,
-    filesSkipped: skippedFiles,
-    groupsWereAutoGenerated: wasGenerated,
-    groupCount: groupedSessions.size,
-    candidates: {
-      A_guidelines: detectGuidelineCandidates(groupedSessions),
-      B_skills: detectSkillCandidates(groupedSessions),
-      C_hooks: detectHookCandidates(groupedSessions),
-      D_mcps: detectMcpCandidates(groupedSessions),
-      E_modelRouting: detectModelRoutingCandidates(groupedSessions),
-      F_agentParallelism: detectAgentParallelismCandidates(groupedSessions),
-      G_sessionHygiene: detectSessionHygieneCandidates(groupedSessions),
-    },
+    A_guidelines: detectGuidelineCandidates(groupedSessions),
+    B_skills: detectSkillCandidates(groupedSessions),
+    C_hooks: detectHookCandidates(groupedSessions),
+    D_mcps: detectMcpCandidates(groupedSessions),
+    E_modelRouting: detectModelRoutingCandidates(groupedSessions),
+    F_agentParallelism: detectAgentParallelismCandidates(groupedSessions),
+    G_sessionHygiene: detectSessionHygieneCandidates(groupedSessions),
   };
 }
 

@@ -79,14 +79,29 @@ node -e '
     }
   }
 
-  // Models sometimes wrap JSON in a markdown fence despite being told not
-  // to — strip it defensively rather than trusting the instruction alone.
-  const stripFence = (text) => text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+  // Models sometimes add prose before/after the JSON, or wrap it in a
+  // markdown fence, despite being told to respond with only the JSON
+  // object. Try progressively more forgiving extraction rather than
+  // trusting the instruction alone.
+  const extractJson = (text) => {
+    const attempts = [
+      text.trim(),
+      (text.match(/```(?:json)?\s*([\s\S]*?)```/i) || [])[1],
+      (text.match(/\{[\s\S]*\}/) || [])[0],
+    ];
+    for (const candidate of attempts) {
+      if (!candidate) continue;
+      try {
+        return JSON.parse(candidate.trim());
+      } catch (err) {
+        continue;
+      }
+    }
+    return null;
+  };
 
-  let graded;
-  try {
-    graded = JSON.parse(stripFence(envelope.result));
-  } catch (err) {
+  const graded = extractJson(envelope.result);
+  if (!graded) {
     console.error(JSON.stringify({ error: "model did not return valid JSON", raw: envelope.result }));
     process.exit(1);
   }

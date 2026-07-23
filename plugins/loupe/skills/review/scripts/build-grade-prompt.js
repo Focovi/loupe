@@ -25,12 +25,13 @@ const OUTPUT_CONTRACT = `Respond with ONLY a single JSON object (no markdown fen
 {
   "category": "<the category letter>",
   "evidence_session_ids": ["<session ids this recommendation is grounded in>"],
+  "is_gap": <true if this documents something missing/wrong that needs fixing, false if the evidence actually shows GOOD behavior worth codifying/preserving as a rule (e.g. a model switch that correctly matched task complexity, or work that was correctly kept serial) — categories E and F in particular can go either way; don't force a gap framing onto a positive finding>,
   "recommendation": "<2-4 sentence human-readable recommendation>",
   "proposed_artifact": "<the literal text/config/skeleton this category's Output column calls for>",
   "apply_prompt": "<a self-contained prompt a person could paste into a fresh Claude Code session to make this change — include target file path, exact change, and a verification step>"
 }
 If, after reviewing the evidence, you conclude the heuristic pre-filter was wrong and this isn't actually a real recommendation, respond instead with:
-{"category": "<letter>", "evidence_session_ids": [], "recommendation": null, "proposed_artifact": null, "apply_prompt": null, "rejected_reason": "<why the evidence doesn't support this>"}`;
+{"category": "<letter>", "evidence_session_ids": [], "is_gap": null, "recommendation": null, "proposed_artifact": null, "apply_prompt": null, "rejected_reason": "<why the evidence doesn't support this>"}`;
 
 function main() {
   const [category, clusterPath, digestPath] = process.argv.slice(2);
