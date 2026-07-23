@@ -31,7 +31,9 @@ const OUTPUT_CONTRACT = `Respond with ONLY a single JSON object (no markdown fen
   "apply_prompt": "<a self-contained prompt a person could paste into a fresh Claude Code session to make this change — include target file path, exact change, and a verification step>"
 }
 If, after reviewing the evidence, you conclude the heuristic pre-filter was wrong and this isn't actually a real recommendation, respond instead with:
-{"category": "<letter>", "evidence_session_ids": [], "is_gap": null, "recommendation": null, "proposed_artifact": null, "apply_prompt": null, "rejected_reason": "<why the evidence doesn't support this>"}`;
+{"category": "<letter>", "evidence_session_ids": [], "is_gap": null, "recommendation": null, "proposed_artifact": null, "apply_prompt": null, "rejected_reason": "<why the evidence doesn't support this>"}
+
+Style: do not use em dashes (—) anywhere in any field. Use a comma, period, colon, or parentheses instead.`;
 
 function main() {
   const [category, clusterPath, digestPath] = process.argv.slice(2);

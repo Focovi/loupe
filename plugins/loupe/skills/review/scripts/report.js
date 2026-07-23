@@ -2,15 +2,17 @@
 'use strict';
 
 /**
- * Loupe scoring engine + run history (Full Spec §5, §3.5).
- *
- * Phase 3 scope: per-category letter grades, a profile-weighted composite
- * grade, and ~/.loupe/runs/ history read/write with run-over-run deltas.
- * The self-contained HTML report and terminal summary (§4) are Phase 4 —
- * this script currently emits JSON only.
+ * Loupe scoring engine, run history, and report rendering (Full Spec §5,
+ * §4, §3.5): per-category letter grades, a profile-weighted composite
+ * grade, ~/.loupe/runs/ history with run-over-run deltas, a terminal
+ * summary on stdout, and a self-contained HTML report written to
+ * ~/.loupe/reports/<timestamp>.html.
  *
  * Usage:
- *   node report.js --candidates <heuristics.js output path> --graded <graded recommendations array path> [--profile <name>]
+ *   node report.js --candidates <heuristics.js output path> --graded <graded recommendations array path> [--profile <name>] [--json]
+ *
+ * --json prints the raw run JSON to stdout instead of rendering the report
+ * (used for scripting/testing; not part of the normal skill flow).
  */
 
 const fs = require('fs');
@@ -19,7 +21,10 @@ const os = require('os');
 
 const HOME_DIR = os.homedir();
 const RUNS_DIR = path.join(HOME_DIR, '.loupe', 'runs');
+const REPORTS_DIR = path.join(HOME_DIR, '.loupe', 'reports');
 const CONFIG_FILE = path.join(HOME_DIR, '.loupe', 'config.json');
+const TERMINAL_SUMMARY_MAX_RECOMMENDATIONS = 8;
+const TERMINAL_SUMMARY_MIN_RECOMMENDATIONS = 5;
 
 const CATEGORY_KEYS = {
   A: 'A_guidelines',
@@ -76,9 +81,16 @@ function main() {
   const run = buildRun({ candidates, gradedRecommendations, profileName, dialWeights });
   const previousRun = loadMostRecentRun();
   run.deltas = previousRun ? computeDeltas(run, previousRun) : null;
-
   persistRun(run);
-  process.stdout.write(JSON.stringify(run, null, 2) + '\n');
+
+  if ('json' in args) {
+    process.stdout.write(JSON.stringify(run, null, 2) + '\n');
+    return;
+  }
+
+  const confirmedRecommendations = gradedRecommendations.filter((r) => r.recommendation);
+  const reportPath = writeHtmlReport(run, confirmedRecommendations);
+  process.stdout.write(renderTerminalSummary(run, confirmedRecommendations, reportPath));
 }
 
 function parseArgs(argv) {
@@ -253,5 +265,424 @@ function computeCategoryDelta(letter, currentRun, previousRun) {
     rankDrop,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Terminal summary (§4.1)
+// ---------------------------------------------------------------------------
+
+const CATEGORY_LABELS = {
+  A: 'Guidelines',
+  B: 'Skills',
+  C: 'Hooks',
+  D: 'MCPs',
+  E: 'Model routing',
+  F: 'Multi-agent',
+  G: 'Session hygiene',
+};
+
+function renderTerminalSummary(run, confirmedRecommendations, reportPath) {
+  const lines = [];
+  lines.push(`Loupe review: composite grade ${run.compositeGrade} (${run.compositeScore}/100), profile "${run.profile}"`);
+  lines.push(`${run.sessionsAnalyzed} sessions analyzed across ${Object.keys(run.categories).length} categories.`);
+  lines.push('');
+
+  for (const letter of Object.keys(CATEGORY_KEYS)) {
+    const cat = run.categories[letter];
+    const delta = run.deltas ? run.deltas.perCategory[letter] : null;
+    const arrow = delta ? deltaArrow(delta.direction) : '';
+    lines.push(`  ${letter} ${CATEGORY_LABELS[letter].padEnd(16)} ${cat.grade} (${cat.score}) ${arrow}`);
+  }
+
+  if (run.deltas && run.deltas.regressions.length > 0) {
+    lines.push('');
+    lines.push('⚠ Regression (2+ letter grade drop):');
+    for (const r of run.deltas.regressions) {
+      lines.push(`  ${r.category} ${CATEGORY_LABELS[r.category]}: ${r.from} → ${r.to}`);
+    }
+  }
+
+  lines.push('');
+  const ranked = rankRecommendations(confirmedRecommendations).slice(0, TERMINAL_SUMMARY_MAX_RECOMMENDATIONS);
+  if (ranked.length === 0) {
+    lines.push('No confirmed recommendations this run.');
+  } else {
+    lines.push(`Top recommendations (${ranked.length}):`);
+    for (const rec of ranked) {
+      lines.push(`  [${rec.category}] ${firstSentence(rec.recommendation)}`);
+    }
+  }
+
+  lines.push('');
+  lines.push(`Full report: ${reportPath}`);
+  return lines.join('\n') + '\n';
+}
+
+function deltaArrow(direction) {
+  if (direction === 'up') return '▲';
+  if (direction === 'down') return '▼';
+  return '';
+}
+
+function rankRecommendations(confirmedRecommendations) {
+  // §4.1: ranked by (frequency of the underlying pattern × estimated
+  // friction). No direct friction measure is available from the grading
+  // output, so evidence-session count is used as the proxy for both —
+  // a pattern grounded in more sessions is both more frequent and (all
+  // else equal) more likely to be worth the reader's attention.
+  return [...confirmedRecommendations].sort(
+    (a, b) => (b.evidence_session_ids || []).length - (a.evidence_session_ids || []).length
+  );
+}
+
+function firstSentence(text) {
+  const match = /^.*?[.!?](?=\s|$)/.exec(text || '');
+  return match ? match[0] : text;
+}
+
+// ---------------------------------------------------------------------------
+// HTML report (§4.2)
+// ---------------------------------------------------------------------------
+
+function writeHtmlReport(run, confirmedRecommendations) {
+  fs.mkdirSync(REPORTS_DIR, { recursive: true });
+  const fileName = run.generatedAt.replace(/[:.]/g, '-') + '.html';
+  const reportPath = path.join(REPORTS_DIR, fileName);
+  const allRuns = loadAllRuns();
+  fs.writeFileSync(reportPath, renderHtmlReport(run, confirmedRecommendations, allRuns));
+  return reportPath;
+}
+
+function loadAllRuns() {
+  if (!fs.existsSync(RUNS_DIR)) return [];
+  return fs.readdirSync(RUNS_DIR)
+    .filter((f) => f.endsWith('.json'))
+    .sort()
+    .map((f) => readJson(path.join(RUNS_DIR, f)));
+}
+
+function renderHtmlReport(run, confirmedRecommendations, allRuns) {
+  const grouped = groupRecommendationsByCategory(confirmedRecommendations);
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Loupe review, ${escapeHtml(run.generatedAt)}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>${REPORT_CSS}</style>
+</head>
+<body class="viz-root">
+<main>
+${renderHeader(run)}
+${renderRegressionBanner(run)}
+${renderCategoryTable(run, allRuns)}
+${renderQuickNav(grouped)}
+${renderRecommendationsSection(grouped)}
+</main>
+<script>${REPORT_JS}</script>
+</body>
+</html>`;
+}
+
+function groupRecommendationsByCategory(confirmedRecommendations) {
+  const ranked = rankRecommendations(confirmedRecommendations);
+  const groups = [];
+  for (const letter of Object.keys(CATEGORY_KEYS)) {
+    const items = ranked.filter((r) => r.category === letter);
+    if (items.length > 0) groups.push({ letter, items });
+  }
+  return groups;
+}
+
+function renderQuickNav(grouped) {
+  if (grouped.length === 0) return '';
+  const links = grouped
+    .map((g) => `<a href="#rec-${escapeHtml(g.letter)}">${escapeHtml(g.letter)} ${escapeHtml(CATEGORY_LABELS[g.letter])} (${g.items.length})</a>`)
+    .join('');
+  return `<nav class="quick-nav">${links}</nav>`;
+}
+
+function renderHeader(run) {
+  return `<header class="report-header">
+  <div class="composite-badge grade-${run.compositeGrade}">${escapeHtml(run.compositeGrade)}</div>
+  <div>
+    <h1>Loupe review</h1>
+    <p class="meta">Composite score ${run.compositeScore}/100 &middot; profile "${escapeHtml(run.profile)}" &middot; ${run.sessionsAnalyzed} sessions analyzed &middot; ${escapeHtml(formatTimestamp(run.generatedAt))}</p>
+  </div>
+</header>`;
+}
+
+function renderRegressionBanner(run) {
+  if (!run.deltas || run.deltas.regressions.length === 0) return '';
+  const items = run.deltas.regressions
+    .map((r) => `<li><strong>${escapeHtml(r.category)} ${escapeHtml(CATEGORY_LABELS[r.category])}</strong>: ${escapeHtml(r.from)} → ${escapeHtml(r.to)}</li>`)
+    .join('');
+  return `<div class="banner banner-critical">
+  <strong>Regression flagged.</strong> The following categories dropped 2 or more letter grades since the last run:
+  <ul>${items}</ul>
+</div>`;
+}
+
+function renderCategoryTable(run, allRuns) {
+  const rows = Object.keys(CATEGORY_KEYS).map((letter) => renderCategoryRow(letter, run, allRuns)).join('');
+  return `<section>
+  <h2>Grade breakdown</h2>
+  <table class="grade-table">
+    <thead><tr><th>Category</th><th>Grade</th><th>Score</th><th>Trend</th><th>Confirmed</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+</section>`;
+}
+
+function renderCategoryRow(letter, run, allRuns) {
+  const cat = run.categories[letter];
+  const delta = run.deltas ? run.deltas.perCategory[letter] : null;
+  const deltaLabel = delta ? `${deltaArrow(delta.direction)} ${delta.previousGrade} → ${delta.currentGrade}` : 'first run';
+  const scoreHistory = allRuns.map((r) => r.categories[letter].score);
+  return `<tr>
+    <td>${escapeHtml(letter)} ${escapeHtml(CATEGORY_LABELS[letter])}</td>
+    <td><span class="grade-pill grade-${cat.grade}">${escapeHtml(cat.grade)}</span></td>
+    <td>${cat.score}</td>
+    <td>${renderSparkline(scoreHistory)}<span class="delta-label">${escapeHtml(deltaLabel)}</span></td>
+    <td>${cat.confirmedFindingCount} <span class="muted">(${cat.gapFindingCount} gap, ${cat.affirmingFindingCount} affirming)</span></td>
+  </tr>`;
+}
+
+const SPARKLINE_WIDTH = 80;
+const SPARKLINE_HEIGHT = 20;
+const SPARKLINE_PADDING = 3;
+
+function renderSparkline(scores) {
+  if (scores.length < 2) return '<span class="muted">not enough history</span>';
+
+  const points = scores.map((score, i) => {
+    const x = SPARKLINE_PADDING + (i / (scores.length - 1)) * (SPARKLINE_WIDTH - 2 * SPARKLINE_PADDING);
+    const y = SPARKLINE_HEIGHT - SPARKLINE_PADDING - (score / 100) * (SPARKLINE_HEIGHT - 2 * SPARKLINE_PADDING);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const lastPoint = points[points.length - 1].split(',');
+
+  return `<svg class="sparkline" width="${SPARKLINE_WIDTH}" height="${SPARKLINE_HEIGHT}" viewBox="0 0 ${SPARKLINE_WIDTH} ${SPARKLINE_HEIGHT}">
+    <polyline points="${points.join(' ')}" class="sparkline-line" />
+    <circle cx="${lastPoint[0]}" cy="${lastPoint[1]}" r="2.5" class="sparkline-dot" />
+  </svg>`;
+}
+
+function renderRecommendationsSection(grouped) {
+  const total = grouped.reduce((sum, g) => sum + g.items.length, 0);
+  if (total === 0) {
+    return '<section><h2>Recommendations</h2><p>No confirmed recommendations this run.</p></section>';
+  }
+  const sections = grouped.map(renderCategoryGroup).join('');
+  return `<section>
+  <h2>Recommendations (${total})</h2>
+  ${sections}
+</section>`;
+}
+
+function renderCategoryGroup(group) {
+  const cards = group.items.map(renderRecommendationCard).join('');
+  return `<div class="category-group" id="rec-${escapeHtml(group.letter)}">
+  <h3 class="category-group-title">${escapeHtml(group.letter)} ${escapeHtml(CATEGORY_LABELS[group.letter])}</h3>
+  ${cards}
+</div>`;
+}
+
+function renderRecommendationCard(rec) {
+  const evidenceIds = (rec.evidence_session_ids || []).map((id) => `<code>${escapeHtml(id)}</code>`).join(', ');
+  const affirmingTag = rec.is_gap === false ? '<span class="tag tag-good">working well, codify it</span>' : '';
+  return `<article class="rec-card">
+  <div class="rec-header">
+    <span class="grade-pill grade-cat-${escapeHtml(rec.category)}">${escapeHtml(rec.category)}</span>
+    ${affirmingTag}
+  </div>
+  <p class="rec-text">${escapeHtml(rec.recommendation)}</p>
+  <details class="artifact-details">
+    <summary>Proposed artifact &amp; apply prompt</summary>
+    ${rec.proposed_artifact ? `<h4>Proposed artifact</h4><pre class="code-block"><code>${escapeHtml(rec.proposed_artifact)}</code></pre>` : ''}
+    <h4>Apply prompt</h4>
+    <div class="apply-block">
+      <pre class="code-block"><code>${escapeHtml(rec.apply_prompt || '')}</code></pre>
+      <button type="button" class="copy-btn" data-copy-text="${escapeHtml(rec.apply_prompt || '')}">Copy</button>
+    </div>
+  </details>
+  <p class="evidence">Evidence: ${evidenceIds || '<span class="muted">none</span>'}</p>
+</article>`;
+}
+
+function escapeHtml(text) {
+  return String(text ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+function formatTimestamp(isoString) {
+  return new Date(isoString).toUTCString();
+}
+
+// ---------------------------------------------------------------------------
+// Inline CSS / JS (self-contained — §7, no build step, no CDN)
+// ---------------------------------------------------------------------------
+
+const REPORT_CSS = `
+:root {
+  --surface-1:      #fcfcfb;
+  --page-plane:     #f9f9f7;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #898781;
+  --gridline:       #e1e0d9;
+  --border:         rgba(11,11,11,0.10);
+  --status-good:    #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical:#d03b3b;
+  --series-1: #2a78d6; --series-2: #1baf7a; --series-3: #eda100; --series-4: #008300;
+  --series-5: #4a3aa7; --series-6: #e34948; --series-7: #e87ba4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-1:      #1a1a19;
+    --page-plane:     #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --border:         rgba(255,255,255,0.10);
+    --status-good:    #0ca30c;
+    --status-warning: #fab219;
+    --status-serious: #ec835a;
+    --status-critical:#d03b3b;
+    --series-1: #3987e5; --series-2: #199e70; --series-3: #c98500; --series-4: #008300;
+    --series-5: #9085e9; --series-6: #e66767; --series-7: #d55181;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 2rem 1rem 4rem;
+  background: var(--page-plane); color: var(--text-primary);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 780px; margin: 0 auto; }
+h1 { font-size: 1.5rem; margin: 0 0 0.25rem; }
+h2 { font-size: 1.1rem; margin: 2rem 0 0.75rem; }
+h3 { font-size: 0.85rem; margin: 1rem 0 0.35rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
+p { margin: 0.4rem 0; }
+.meta { color: var(--text-secondary); font-size: 0.9rem; }
+.muted { color: var(--text-muted); }
+.report-header { display: flex; align-items: center; gap: 1.25rem; }
+.composite-badge {
+  flex: none; width: 64px; height: 64px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.75rem; font-weight: 600; color: #fff;
+  background: var(--status-good);
+}
+.composite-badge.grade-A, .composite-badge.grade-B { background: var(--status-good); }
+.composite-badge.grade-C { background: var(--status-warning); color: #2b2200; }
+.composite-badge.grade-D { background: var(--status-serious); }
+.composite-badge.grade-F { background: var(--status-critical); }
+.banner { border-radius: 8px; padding: 0.75rem 1rem; margin-top: 1.5rem; font-size: 0.9rem; }
+.banner-critical { background: color-mix(in srgb, var(--status-critical) 12%, var(--surface-1)); border: 1px solid var(--status-critical); }
+.banner ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+.grade-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.grade-table th, .grade-table td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--gridline); vertical-align: middle; }
+.grade-table th { color: var(--text-muted); font-weight: 500; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.grade-pill {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.8rem; height: 1.8rem; border-radius: 6px; font-weight: 600; color: #fff; font-size: 0.85rem;
+}
+.grade-pill.grade-A, .grade-pill.grade-B { background: var(--status-good); }
+.grade-pill.grade-C { background: var(--status-warning); color: #2b2200; }
+.grade-pill.grade-D { background: var(--status-serious); }
+.grade-pill.grade-F { background: var(--status-critical); }
+.grade-pill.grade-cat-A { background: var(--series-1); }
+.grade-pill.grade-cat-B { background: var(--series-2); }
+.grade-pill.grade-cat-C { background: var(--series-3); color: #2b2200; }
+.grade-pill.grade-cat-D { background: var(--series-4); }
+.grade-pill.grade-cat-E { background: var(--series-5); }
+.grade-pill.grade-cat-F { background: var(--series-6); }
+.grade-pill.grade-cat-G { background: var(--series-7); }
+.sparkline { vertical-align: middle; margin-right: 0.5rem; }
+.sparkline-line { fill: none; stroke: var(--text-muted); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.sparkline-dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
+.delta-label { font-size: 0.82rem; color: var(--text-secondary); vertical-align: middle; }
+.quick-nav { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.25rem; }
+.quick-nav a {
+  font-size: 0.8rem; color: var(--text-secondary); text-decoration: none;
+  border: 1px solid var(--border); border-radius: 999px; padding: 0.25rem 0.65rem;
+}
+.quick-nav a:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+.category-group { margin-top: 1.5rem; }
+.category-group-title {
+  font-size: 1rem; color: var(--text-primary); text-transform: none; letter-spacing: normal;
+  padding-top: 0.6rem; margin-top: 0; border-top: 2px solid var(--gridline);
+}
+.rec-card { border: 1px solid var(--border); border-radius: 10px; padding: 0.85rem 1.1rem; margin-bottom: 0.75rem; background: var(--surface-1); }
+.rec-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
+.tag { font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 999px; background: color-mix(in srgb, var(--status-good) 16%, var(--surface-1)); color: var(--status-good); }
+.rec-text { font-size: 0.93rem; }
+.artifact-details { margin-top: 0.5rem; }
+.artifact-details summary {
+  cursor: pointer; font-size: 0.82rem; color: var(--text-secondary);
+  padding: 0.3rem 0; user-select: none;
+}
+.artifact-details summary:hover { color: var(--text-primary); }
+.artifact-details[open] summary { margin-bottom: 0.25rem; }
+.artifact-details h4 { font-size: 0.78rem; margin: 0.75rem 0 0.3rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
+.code-block {
+  background: var(--page-plane); border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.75rem; font-size: 0.82rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.apply-block { position: relative; }
+.copy-btn {
+  position: absolute; top: 0.5rem; right: 0.5rem;
+  font: inherit; font-size: 0.78rem; padding: 0.25rem 0.6rem;
+  border-radius: 6px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary);
+  cursor: pointer;
+}
+.copy-btn:hover { background: var(--page-plane); }
+.copy-btn.copied { background: var(--status-good); color: #fff; border-color: var(--status-good); }
+.evidence { font-size: 0.8rem; color: var(--text-secondary); }
+.evidence code { font-size: 0.78rem; }
+table { table-layout: auto; }
+@media (max-width: 480px) {
+  .grade-table { display: block; overflow-x: auto; }
+}
+`;
+
+const REPORT_JS = `
+document.addEventListener('click', function (event) {
+  var btn = event.target.closest('.copy-btn');
+  if (!btn) return;
+  var text = btn.getAttribute('data-copy-text') || '';
+  copyToClipboard(text).then(function () {
+    var original = btn.textContent;
+    btn.textContent = 'Copied';
+    btn.classList.add('copied');
+    setTimeout(function () { btn.textContent = original; btn.classList.remove('copied'); }, 1500);
+  });
+});
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).catch(function () { return legacyCopy(text); });
+  }
+  return legacyCopy(text);
+}
+
+function legacyCopy(text) {
+  return new Promise(function (resolve) {
+    var textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try { document.execCommand('copy'); } catch (err) { /* best effort */ }
+    document.body.removeChild(textarea);
+    resolve();
+  });
+}
+`;
 
 main();

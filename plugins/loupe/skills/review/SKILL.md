@@ -71,25 +71,25 @@ All script paths below are relative to `${CLAUDE_PLUGIN_ROOT}/skills/review/scri
    recommendation into a single list. Each has
    `{category, evidence_session_ids, recommendation, proposed_artifact, apply_prompt}`.
 
-6. **Score the run.** Write step 2's heuristics output to a temp file and
-   step 5's collected recommendations (the full graded array, including
-   rejected ones — `report.js` uses rejection counts too) to another temp
-   file, then run:
+6. **Score the run and build the report.** Write step 2's heuristics
+   output to a temp file and step 5's collected recommendations (the full
+   graded array, including rejected ones — `report.js` uses rejection
+   counts too) to another temp file, then run:
    ```
    node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/report.js" --candidates <heuristics-output.json> --graded <graded-recommendations.json>
    ```
    This computes per-category letter grades and a profile-weighted
    composite grade (§5, §3.5), persists the full run to
-   `~/.loupe/runs/<timestamp>.json`, and — once a prior run exists — prints
-   run-over-run deltas and flags any category that dropped 2+ letter
-   grades.
+   `~/.loupe/runs/<timestamp>.json`, writes the self-contained HTML report
+   to `~/.loupe/reports/<timestamp>.html`, and prints a terminal summary
+   (composite grade, per-category grades with ▲/▼ deltas once a prior run
+   exists, and the top 5-8 recommendations) to stdout — that stdout output
+   is exactly what to relay back to the user, verbatim, don't re-derive it.
+   The last line of stdout is the HTML report's file path.
 
-7. **Present the run.** Print a plain-text summary to the terminal:
-   composite grade, per-category grades (with ▲/▼ deltas if a previous run
-   exists), and the full text of each confirmed recommendation with its
-   evidence session IDs and Apply prompt. Note explicitly which categories
-   came back empty and whether that's because nothing was found or because
-   everything got rejected at grading — those mean different things.
-
-   *(The self-contained HTML report (§4) is Phase 4's job — until it
-   lands, the terminal summary above is this skill's full output.)*
+7. **Open the report and present the run.** Open the HTML report path from
+   step 6 automatically (`open <path>` on macOS) so it's already on screen,
+   then show the user the terminal summary. Note explicitly which
+   categories came back empty and whether that's because nothing was found
+   or because everything got rejected at grading — those mean different
+   things.
