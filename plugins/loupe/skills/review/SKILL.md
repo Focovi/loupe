@@ -13,6 +13,17 @@ design; this file implements §3's orchestration.
 
 All script paths below are relative to `${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/`.
 
+## Scoping to a repo or branch (optional)
+
+If the user invoked this with arguments (e.g. `/loupe:review Sidelit`,
+`/loupe:review --branch main`, `/loupe:review --repo ~/Developer/Sidelit/main --branch fix/android-signin`),
+or asks in chat to scope the review, forward them to `heuristics.js` in
+Step 2 as `--repo <name-or-path>` and/or `--branch <name>`. `--repo`
+accepts either a `~/.loupe/groups.json` project name (the common case,
+e.g. `Sidelit`) or a literal path for one specific repo/worktree. With no
+arguments, the review covers everything (subject to the incremental
+filtering below) — that's the default and normal case.
+
 ## Reporting progress (read this before Step 1)
 
 A full run makes up to 20 real, sequential `claude -p` calls in Step 4, each

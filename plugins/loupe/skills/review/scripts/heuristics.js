@@ -89,7 +89,14 @@ function main() {
     return;
   }
 
-  const result = runHeuristicPass({ full: args.includes('--full') });
+  const repoIndex = args.indexOf('--repo');
+  const branchIndex = args.indexOf('--branch');
+
+  const result = runHeuristicPass({
+    full: args.includes('--full'),
+    repo: repoIndex !== -1 ? args[repoIndex + 1] : null,
+    branch: branchIndex !== -1 ? args[branchIndex + 1] : null,
+  });
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
 }
 
@@ -372,6 +379,25 @@ function findGroupForSession(session, groups) {
     }
   }
   return null;
+}
+
+// --repo/--branch scoping. --repo accepts either a groups.json project
+// name (e.g. "Sidelit") or a literal path (e.g. "~/Developer/Sidelit" or
+// "/Users/mison/Developer/Sidelit/main" for one worktree specifically) —
+// tried as a group name first since that's the common case, falling back
+// to a path prefix match so an ungrouped or one-off repo still works.
+function filterByScope(sessions, groups, { repo, branch }) {
+  let filtered = sessions;
+  if (repo) filtered = filtered.filter((session) => sessionMatchesRepo(session, groups, repo));
+  if (branch) filtered = filtered.filter((session) => session.gitBranch === branch);
+  return filtered;
+}
+
+function sessionMatchesRepo(session, groups, repoArg) {
+  if (findGroupForSession(session, groups) === repoArg) return true;
+  if (!session.cwd) return false;
+  const resolvedPath = path.resolve(repoArg.replace(/^~/, HOME_DIR));
+  return session.cwd === resolvedPath || session.cwd.startsWith(resolvedPath + path.sep);
 }
 
 // ---------------------------------------------------------------------------
@@ -739,21 +765,27 @@ function correctionRate(turns) {
 // Orchestration
 // ---------------------------------------------------------------------------
 
-function runHeuristicPass({ full = false } = {}) {
+function runHeuristicPass({ full = false, repo = null, branch = null } = {}) {
   const excludedSessionIds = loadExcludedSessionIds();
   const { sessions: discoveredSessions, skippedFiles, newlyExcluded } = loadAnalyzableSessions(excludedSessionIds);
   persistNewlyDetectedSelfSessions(newlyExcluded);
 
-  const lastReviewAt = full ? null : findLastReviewTimestamp();
-  const { sessions: allSessions, skippedAsAlreadyReviewed } = filterSinceLastReview(discoveredSessions, lastReviewAt);
+  // Groups are resolved from the full discovered set, before any
+  // repo/branch narrowing — auto-suggestion (§1.1) needs the whole
+  // picture to cluster sensibly, and --repo itself can name a group.
+  const { groups, wasGenerated } = loadOrSuggestGroups(discoveredSessions);
 
-  const { groups, wasGenerated } = loadOrSuggestGroups(allSessions);
+  const lastReviewAt = full ? null : findLastReviewTimestamp();
+  const { sessions: sinceLastReview, skippedAsAlreadyReviewed } = filterSinceLastReview(discoveredSessions, lastReviewAt);
+  const allSessions = filterByScope(sinceLastReview, groups, { repo, branch });
+
   const groupedSessions = assignSessionsToGroups(allSessions, groups);
 
   return {
     generatedAt: new Date().toISOString(),
     incremental: lastReviewAt !== null,
     reviewedSince: lastReviewAt,
+    scope: { repo, branch },
     sessionsAnalyzed: allSessions.length,
     sessionsSkippedAlreadyReviewed: skippedAsAlreadyReviewed,
     sessionsExcludedSelfReferential: newlyExcluded.length,
