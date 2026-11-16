@@ -127,10 +127,12 @@ function callClaude(prompt, model) {
  * Works out how to start `claude` without a shell. On Windows a native
  * install is claude.exe and runs directly; an npm install is claude.cmd,
  * which Node can only start through cmd.exe. LOUPE_CLAUDE_BIN overrides
- * the lookup.
+ * the lookup. Otherwise the Claude Code running this session wins
+ * (CLAUDE_CODE_EXECPATH): the desktop app bundles its own copy and puts
+ * none on PATH, and that copy is the one already signed in.
  */
 function buildClaudeInvocation(claudeArgs, { platform, env, findOnPath = findExecutableOnPath }) {
-  const configured = env.LOUPE_CLAUDE_BIN;
+  const configured = env.LOUPE_CLAUDE_BIN || env.CLAUDE_CODE_EXECPATH;
   if (platform !== 'win32') return { command: configured || 'claude', args: claudeArgs, windowsVerbatimArguments: false };
 
   const executable = configured || findOnPath(['claude.exe', 'claude.cmd'], env) || 'claude.exe';
