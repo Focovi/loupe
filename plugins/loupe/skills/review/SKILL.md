@@ -77,21 +77,28 @@ important one — **a one-line update after every single grading call in Step
    clusters across 7 categories") so they see something concrete before the
    slow part starts.
 
-3. **Flatten candidates into a grading queue.** Build a list of
-   `{categoryLetter, cluster}` pairs from every array in `candidates`
-   (e.g. `A_guidelines` → letter `A`, `B_skills` → letter `B`, and so on
-   through `G_sessionHygiene` → `G`). One entry per cluster, not per raw
-   session — a cluster already aggregates its evidence session IDs, and
-   grading is priced per call (§3), so grading the cluster once instead of
-   grading each underlying session separately is the whole point of the
-   pre-filtering step.
+3. **Take the grading queue.** Step 2's JSON also has a `gradingQueue`
+   object, already built from `candidates`: one entry per cluster (not per
+   raw session, since a cluster already aggregates its evidence session IDs
+   and grading is priced per call, §3), each
+   `{categoryLetter, reach, cluster}`. Use its `entries` in order as the
+   queue for step 4; don't rebuild it by hand.
 
    **Temporary cost guard:** until Phase 5's `--optimize` dial system
-   lands, cap the queue at 20 clusters total for a single run. If there
-   are more, keep the 20 with the largest `evidenceSessionIds` /
-   `occurrenceCount` (whichever the cluster has) — the widest-reach
-   candidates are the most worth a grading call — and tell the user in
-   the terminal summary how many were skipped and why.
+   lands, the queue holds at most 20 clusters (`totalSlots`). They are
+   shared fairly so one noisy category can't take every slot:
+   - Every category with at least one candidate gets an equal share
+     (`perCategoryShare`, 20 divided by the number of such categories,
+     rounded down), filled with that category's widest-reach clusters.
+     Reach is `evidenceSessionCount` when the cluster has it (wide clusters
+     carry a sample of evidence IDs plus the full count), otherwise the
+     larger of `evidenceSessionIds` length and `occurrenceCount`.
+   - Slots a category can't use, because it has fewer clusters than its
+     share, go back into a pool filled by reach across every category.
+
+   Tell the user in the terminal summary how many were skipped and why,
+   per category (`skippedByCategory`), e.g. "graded 20 of 143 candidates;
+   skipped 40 multi-agent and 83 skills candidates past their share".
 
 4. **Grade each queued cluster, narrating as you go.** This step is the
    entire wall-clock cost of a run, so it's the one place silence reads as
