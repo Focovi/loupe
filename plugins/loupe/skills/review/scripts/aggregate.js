@@ -20,6 +20,7 @@ const { EXPORT_SCHEMA, CATEGORY_LABELS } = require('./export');
 
 const SESSIONS_PER_RATE = 10;
 const CATEGORY_LETTERS = Object.keys(CATEGORY_LABELS);
+const UNRECORDED_MODEL = 'unrecorded';
 
 function main() {
   const argv = process.argv.slice(2);
@@ -67,7 +68,7 @@ function combineByDeveloper(exports) {
 function emptyDeveloper(name) {
   const categories = {};
   for (const letter of CATEGORY_LETTERS) categories[letter] = { gaps: 0, affirming: 0, graded: 0, candidates: 0 };
-  return { developer: name, exportCount: 0, sessionsAnalyzed: 0, firstRun: null, lastRun: null, categories, findings: [] };
+  return { developer: name, exportCount: 0, sessionsAnalyzed: 0, firstRun: null, lastRun: null, gradingModels: [], categories, findings: [] };
 }
 
 function addExport(developer, exported) {
@@ -75,6 +76,9 @@ function addExport(developer, exported) {
   developer.sessionsAnalyzed += exported.sessionsAnalyzed;
   developer.firstRun = minIso(developer.firstRun, exported.runGeneratedAt);
   developer.lastRun = maxIso(developer.lastRun, exported.runGeneratedAt);
+  for (const model of exportGradingModels(exported)) {
+    if (!developer.gradingModels.includes(model)) developer.gradingModels.push(model);
+  }
   for (const letter of CATEGORY_LETTERS) {
     const source = exported.categories[letter];
     if (!source) continue;
@@ -87,6 +91,12 @@ function addExport(developer, exported) {
   developer.findings.push(...exported.findings);
 }
 
+// Exports made before the grading model was recorded say nothing about it.
+function exportGradingModels(exported) {
+  const models = exported.gradingModels || [];
+  return models.length ? models : [UNRECORDED_MODEL];
+}
+
 function finalizeRates(developer) {
   for (const category of Object.values(developer.categories)) {
     category.gapsPer10Sessions = developer.sessionsAnalyzed
@@ -97,6 +107,7 @@ function finalizeRates(developer) {
 
 function renderMarkdown(developers) {
   const lines = ['# Loupe team view', ''];
+  lines.push(...renderGradingModelWarning(developers));
   lines.push(...renderOverviewTable(developers), '');
   lines.push(...renderTeamPatterns(developers), '');
   for (const developer of developers) lines.push(...renderDeveloper(developer), '');
@@ -106,6 +117,17 @@ function renderMarkdown(developers) {
     'between people; use the findings._',
   );
   return lines.join('\n') + '\n';
+}
+
+// Rates are only comparable when every export was graded by the same
+// model, so a mix is called out before anything else.
+function renderGradingModelWarning(developers) {
+  const allModels = new Set(developers.flatMap((d) => d.gradingModels));
+  if (allModels.size <= 1) return [];
+  const lines = ['> **Warning: these exports were graded with different models, so rates are not fully comparable.**'];
+  for (const developer of developers) lines.push(`> - ${developer.developer}: ${developer.gradingModels.join(', ')}`);
+  lines.push('> Ask everyone to run the same Loupe version without LOUPE_GRADE_MODEL set, then re-export.', '');
+  return lines;
 }
 
 function renderOverviewTable(developers) {
