@@ -151,15 +151,58 @@ test('detectGuidelineCandidates counts repeated text once per session', () => {
   assert.deepEqual(clusters[0].evidenceSessionIds, ['s1', 's2']);
 });
 
+function deploySession(sessionId, day) {
+  const steps = ['npm run build', 'aws s3 sync dist s3://site', 'aws cloudfront create-invalidation --paths "/*"'];
+  return {
+    sessionId,
+    turns: [human('ship the site'), { ...assistant(...steps.map((command) => tool('Bash', { command }))), timestamp: `2026-01-${day}` }],
+  };
+}
+
 test('detectSkillCandidates keeps a sample of evidence and the full count', () => {
-  const sessions = Array.from({ length: 12 }, (_, i) => ({
-    sessionId: `s${i}`,
-    turns: [{ ...assistant(tool('Read', {}), tool('Edit', {}), tool('Bash', {})), timestamp: `2026-01-${String(i + 1).padStart(2, '0')}` }],
-  }));
+  const sessions = Array.from({ length: 12 }, (_, i) => deploySession(`s${i}`, String(i + 1).padStart(2, '0')));
+
   const [cluster] = detectSkillCandidates(new Map([['repo', sessions]]));
+
   assert.equal(cluster.evidenceSessionCount, 12);
   assert.equal(cluster.evidenceSessionIds.length, 8);
   assert.equal(cluster.evidenceSessionIds[0], 's11', 'most recent first');
+});
+
+test('detectSkillCandidates names the recurring procedure steps', () => {
+  const sessions = ['01', '02', '03'].map((day) => deploySession(`s${day}`, day));
+
+  const [cluster] = detectSkillCandidates(new Map([['repo', sessions]]));
+
+  assert.deepEqual(cluster.procedureSteps, ['npm run build', 'aws s3 sync', 'aws cloudfront create-invalidation']);
+});
+
+test('detectSkillCandidates needs the procedure in three sessions', () => {
+  const sessions = ['01', '02'].map((day) => deploySession(`s${day}`, day));
+
+  assert.deepEqual(detectSkillCandidates(new Map([['repo', sessions]])), []);
+});
+
+test('detectSkillCandidates ignores sessions that share only generic tools', () => {
+  const sessions = Array.from({ length: 5 }, (_, i) => ({
+    sessionId: `s${i}`,
+    turns: [assistant(tool('Read', {}), tool('Edit', {}), tool('Grep', {}), tool('Bash', { command: 'ls' }))],
+  }));
+
+  assert.deepEqual(detectSkillCandidates(new Map([['repo', sessions]])), []);
+});
+
+test('detectSkillCandidates joins overlapping runs into one procedure', () => {
+  const commands = ['make build', 'make package', 'scp out.tar host:', 'ssh host restart'];
+  const sessions = ['s1', 's2', 's3'].map((sessionId) => ({
+    sessionId,
+    turns: [assistant(...commands.map((command) => tool('Bash', { command })))],
+  }));
+
+  const clusters = detectSkillCandidates(new Map([['repo', sessions]]));
+
+  assert.equal(clusters.length, 1);
+  assert.deepEqual(clusters[0].procedureSteps, ['make build', 'make package', 'scp', 'ssh host restart']);
 });
 
 function risingSession(sessionId, correctionCount) {
