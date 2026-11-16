@@ -8,7 +8,8 @@ const {
   followsFileEditTool,
   isManualWorkTurn,
   collectUsedMcpServers,
-  countIndependentSerialChunks,
+  longestExplorationRoundTrips,
+  detectAgentParallelismCandidates,
   isPersonTypedTurn,
   detectGuidelineCandidates,
   detectSkillCandidates,
@@ -77,12 +78,58 @@ test('collectUsedMcpServers matches full configured names', () => {
   assert.deepEqual([...used].sort(), ['docs', 'plugin_acme_acme-cards']);
 });
 
-test('countIndependentSerialChunks counts lookup runs but not Bash pipelines', () => {
-  const lookups = { turns: [assistant(tool('Read', { file_path: 'a.js' }), tool('Read', { file_path: 'b.js' }), tool('Read', { file_path: 'c.js' }))] };
-  assert.equal(countIndependentSerialChunks(lookups), 1);
+function toolResult() {
+  return { type: 'user', isMeta: false, isToolResultTurn: true, text: null, toolUses: [] };
+}
 
-  const pipeline = { turns: [assistant(tool('Bash', { command: 'npm run build' }), tool('Bash', { command: 'npm test' }), tool('Bash', { command: 'git commit -m x' }))] };
-  assert.equal(countIndependentSerialChunks(pipeline), 0);
+function serialReads(count) {
+  return Array.from({ length: count }, (_, i) => [assistant(tool('Read', { file_path: `f${i}.js` })), toolResult()]).flat();
+}
+
+test('longestExplorationRoundTrips counts lookups one round trip after another', () => {
+  assert.equal(longestExplorationRoundTrips({ turns: serialReads(4) }), 4);
+});
+
+test('longestExplorationRoundTrips counts lookups sent together once', () => {
+  const batched = { turns: [assistant(tool('Read', { file_path: 'a.js' })), assistant(tool('Grep', { pattern: 'x' })), toolResult()] };
+
+  assert.equal(longestExplorationRoundTrips(batched), 1);
+});
+
+test('longestExplorationRoundTrips restarts after an edit or a person turn', () => {
+  const turns = [...serialReads(3), assistant(tool('Edit', { file_path: 'a.js' })), toolResult(), ...serialReads(2), human('next'), ...serialReads(1)];
+
+  assert.equal(longestExplorationRoundTrips({ turns }), 3);
+});
+
+test('longestExplorationRoundTrips ignores Bash commands that do work', () => {
+  const turns = [assistant(tool('Bash', { command: 'npm test' })), toolResult(), assistant(tool('Bash', { command: 'npm run build' })), toolResult()];
+
+  assert.equal(longestExplorationRoundTrips({ turns }), 0);
+});
+
+test('detectAgentParallelismCandidates flags long exploration seen in two sessions', () => {
+  const sessions = [{ sessionId: 's1', turns: serialReads(10) }, { sessionId: 's2', turns: serialReads(12) }];
+
+  const [cluster] = detectAgentParallelismCandidates(new Map([['repo', sessions]]));
+
+  assert.equal(cluster.signal, 'long-exploration-in-main-session');
+  assert.equal(cluster.longestExplorationRoundTrips, 12);
+  assert.deepEqual(cluster.evidenceSessionIds, ['s2', 's1']);
+});
+
+test('detectAgentParallelismCandidates ignores short lookup runs and one-off exploration', () => {
+  const sessions = [{ sessionId: 's1', turns: serialReads(9) }, { sessionId: 's2', turns: serialReads(30) }];
+
+  assert.deepEqual(detectAgentParallelismCandidates(new Map([['repo', sessions]])), []);
+});
+
+test('detectAgentParallelismCandidates flags subagents given only trivial work', () => {
+  const sessions = [{ sessionId: 's1', turns: [assistant(tool('Agent', { prompt: 'read a.js' }))] }];
+
+  const [cluster] = detectAgentParallelismCandidates(new Map([['repo', sessions]]));
+
+  assert.equal(cluster.signal, 'subagents-for-trivial-work');
 });
 
 const COMPACTION_SUMMARY = 'This session is being continued from a previous conversation. Never commit generated files.';
