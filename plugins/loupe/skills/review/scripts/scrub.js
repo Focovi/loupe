@@ -44,8 +44,8 @@ function buildTermPatterns(redactTerms) {
 }
 
 // Matches a term case-insensitively wherever it is a word or an identifier
-// part: search_kombo, KomboAtsClient and getKomboClient all match, while
-// kombos does not. The match is case-insensitive through character classes
+// part: for the term "acme", search_acme, AcmeApiClient and getAcmeClient
+// all match, while acmes does not. The match is case-insensitive through character classes
 // rather than the i flag, because the camelCase checks need real case.
 function identifierAwareTermSource(term) {
   const caseless = escapeRegExp(term).replace(/[a-z]/gi, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`);
