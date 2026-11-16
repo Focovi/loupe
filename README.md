@@ -68,7 +68,9 @@ used; the default root is `~/Developer`, and you can list your own:
 in `~/.loupe/config.json`. Anything else falls back to the session's own
 folder. Home, project roots and temp folders are never projects. The first
 run writes the suggestion to `~/.loupe/groups.json`; edit that file to
-merge or rename projects, and Loupe uses it as is from then on.
+merge or rename projects. Later runs keep your entries as they are and
+only add projects that no entry covers yet, such as a repo you started
+after the first run.
 
 ## Development
 

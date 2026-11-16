@@ -203,6 +203,31 @@ function suggestGroups(cwds, options) {
   return groups;
 }
 
+/**
+ * Adds projects for the cwds no existing group covers, so projects started
+ * after groups.json was written get grouped too. Existing groups, including
+ * hand edits, are never changed. Returns { groups, addedNames }.
+ */
+function addMissingGroups(existingGroups, cwds, options) {
+  const covered = (cwd) => Object.values(existingGroups)
+    .some((repoPaths) => repoPaths.some((repoPath) => isSameOrInside(cwd, expandHome(repoPath, options.homeDir))));
+  const suggested = suggestGroups(cwds.filter((cwd) => cwd && !covered(cwd)), options);
+
+  const groups = { ...existingGroups };
+  const addedNames = [];
+  for (const [projectName, repoPaths] of Object.entries(suggested)) {
+    const name = nameNotIn(groups, projectName, repoPaths[0]);
+    groups[name] = repoPaths;
+    addedNames.push(name);
+  }
+  return { groups, addedNames };
+}
+
+function nameNotIn(groups, projectName, repoPath) {
+  const taken = new Map(Object.keys(groups).map((name) => [name, name]));
+  return uniqueProjectName({ projectName, repoPath }, taken);
+}
+
 function uniqueProjectName({ projectName, repoPath }, projectIdByName) {
   if (!projectIdByName.has(projectName)) return projectName;
   const pathApi = pathApiFor(repoPath);
@@ -216,6 +241,7 @@ function uniqueProjectName({ projectName, repoPath }, projectIdByName) {
 module.exports = {
   suggestProjectForPath,
   suggestGroups,
+  addMissingGroups,
   findGitProject,
   isSameOrInside,
   expandHome,

@@ -6,6 +6,7 @@ const path = require('node:path');
 const {
   suggestProjectForPath,
   suggestGroups,
+  addMissingGroups,
   isSameOrInside,
 } = require('../plugins/loupe/skills/review/scripts/grouping');
 
@@ -202,3 +203,38 @@ test('real file system: a temp bare + worktree layout is detected', (t) => {
 function pick(suggestion) {
   return suggestion && { projectName: suggestion.projectName, repoPath: suggestion.repoPath };
 }
+
+function addMissing(existing, cwds, entries = {}) {
+  return addMissingGroups(existing, cwds, { homeDir: POSIX_HOME, tempDirs: NO_TEMP_DIRS, fileSystem: fakeFileSystem(entries) });
+}
+
+test('addMissingGroups adds a project no existing group covers', () => {
+  const entries = { '/srv/work/acme/main/.git': 'gitdir: ../.bare/worktrees/main\n' };
+
+  const { groups, addedNames } = addMissing({ shop: ['/srv/work/shop'] }, ['/srv/work/shop/src', '/srv/work/acme/main'], entries);
+
+  assert.deepEqual(groups, { shop: ['/srv/work/shop'], acme: ['/srv/work/acme'] });
+  assert.deepEqual(addedNames, ['acme']);
+});
+
+test('addMissingGroups leaves existing groups and their names alone', () => {
+  const existing = { 'My App': ['~/Developer/app'] };
+
+  const { groups, addedNames } = addMissing(existing, ['/Users/alex/Developer/app/main']);
+
+  assert.deepEqual(groups, existing);
+  assert.deepEqual(addedNames, []);
+});
+
+test('addMissingGroups groups a removed worktree under its project root', () => {
+  const { groups } = addMissing({}, ['/Users/alex/Developer/app/.claude/worktrees/gone-123', '/Users/alex/Developer/app/main']);
+
+  assert.deepEqual(groups, { app: ['/Users/alex/Developer/app'] });
+});
+
+test('addMissingGroups renames a new project whose name is already taken', () => {
+  const { groups, addedNames } = addMissing({ app: ['/srv/old/app'] }, ['/Users/alex/Developer/app']);
+
+  assert.deepEqual(addedNames, ['app (Developer)']);
+  assert.deepEqual(groups['app (Developer)'], ['/Users/alex/Developer/app']);
+});
