@@ -28,7 +28,7 @@ with a lead" at the end, and needs no new review run.
 
 ## Reporting progress (read this before Step 1)
 
-A full run makes up to 20 real `claude -p` calls in Step 4, four at a
+A full run makes up to 20 real `claude -p` calls in Step 4, eight at a
 time, each taking anywhere from 15 seconds to a few minutes. **Nothing about
 this skill is fast, and none of it streams on its own** — a Bash tool call's
 output only appears once that call finishes, so if you silently run the
@@ -104,12 +104,12 @@ Step 4**, not just at the end. Treat silence during Step 4 as a bug.
 4. **Grade the queue in batches, narrating as you go.** This step is the
    entire wall-clock cost of a run, so it's the one place silence reads as
    broken. Before starting, tell the user how many clusters are queued
-   ("Grading 14 candidates, four at a time, this takes a few minutes...").
+   ("Grading 14 candidates, eight at a time, this takes a few minutes...").
    Then run batches, starting at 0:
    ```
    node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/grade-batch.js" <run dir>/heuristics.json --out <run dir>/graded --start 0
    ```
-   Each call grades the next four clusters side by side with `grade.js`,
+   Each call grades the next eight clusters side by side with `grade.js`,
    which pins the grading model so every developer's grades are
    comparable (never pass a different model unless the user asks). It
    prints one line per cluster, `[i/total] <category label>: accepted`,

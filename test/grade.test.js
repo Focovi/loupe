@@ -107,7 +107,7 @@ let input = '';
 process.stdin.on('data', (c) => (input += c));
 process.stdin.on('end', () => {
   const graded = { category: 'B', evidence_session_ids: ['s1'], title: 'Add a skill', recommendation: 'Do it.' };
-  process.stdout.write(JSON.stringify({ is_error: false, result: '', structured_output: graded }));
+  process.stdout.write(JSON.stringify({ is_error: false, result: '', structured_output: graded, total_cost_usd: 0.042 }));
 });
 `;
 
@@ -144,7 +144,7 @@ test('the grading call runs isolated from the developer setup and saves no sessi
   assert.ok(Number(argAfter(args, '--max-budget-usd')) > 0);
 });
 
-test('grade.js records the grader setup with the model', { skip: process.platform === 'win32' }, () => {
+test('grade.js records the grader setup and what the call cost', { skip: process.platform === 'win32' }, () => {
   const { env } = withFakeClaude();
   const gradeScript = path.join(__dirname, '..', 'plugins', 'loupe', 'skills', 'review', 'scripts', 'grade.js');
 
@@ -157,6 +157,7 @@ test('grade.js records the grader setup with the model', { skip: process.platfor
   const graded = JSON.parse(stdout);
   assert.equal(graded.title, 'Add a skill');
   assert.equal(graded.grading_model, 'claude-test-1 (isolated grader, medium effort)');
+  assert.equal(graded.grading_cost_usd, 0.042);
 });
 
 test('readAnswer prefers the schema-checked answer', () => {

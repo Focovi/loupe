@@ -60,3 +60,12 @@ test('parseGroups needs every index exactly once', () => {
 test('buildConsolidationPrompt carries the self-exclusion signature', () => {
   assert.match(buildConsolidationPrompt([finding('B', 'x', [])]), /merging duplicate findings for Loupe/);
 });
+
+test('a merged duplicate keeps what grading it cost', () => {
+  const graded = [finding('B', 'one', ['a'], { grading_cost_usd: 0.1 }), finding('B', 'two', ['b'], { grading_cost_usd: 0.05 })];
+
+  const result = consolidateFindings(graded, () => ({ groups: [[0, 1]] }));
+
+  assert.equal(result[0].grading_cost_usd, 0.1);
+  assert.equal(result[0].merged_findings[0].grading_cost_usd, 0.05);
+});

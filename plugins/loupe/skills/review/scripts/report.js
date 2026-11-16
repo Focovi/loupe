@@ -27,6 +27,7 @@ const TERMINAL_SUMMARY_MAX_RECOMMENDATIONS = 5;
 // Runs graded before findings had a title fall back to a clipped first
 // sentence, so the summary stays one short line per finding.
 const SUMMARY_LINE_MAX_CHARS = 90;
+const CENTS_PER_DOLLAR = 100;
 
 const CATEGORY_KEYS = {
   A: 'A_guidelines',
@@ -197,10 +198,36 @@ function buildRun({ candidates, gradedRecommendations, profileName, dialWeights 
     // Grades from different models are not comparable, so the run records
     // which ones grade.js used (normally exactly one).
     gradingModels: listGradingModels(gradedRecommendations),
+    gradedClusterCount: countGradedClusters(gradedRecommendations),
+    gradingCostUsd: sumGradingCost(gradedRecommendations),
     categories: categoryResults,
     compositeScore: composite,
     compositeGrade: scoreToGrade(composite),
   };
+}
+
+/**
+ * What the grading calls cost, merged duplicates included, or null when no
+ * result recorded a cost (runs graded before costs were recorded). The few
+ * consolidation calls are not counted.
+ */
+function sumGradingCost(gradedRecommendations) {
+  const costs = gradedRecommendations
+    .flatMap((r) => [r, ...(Array.isArray(r.merged_findings) ? r.merged_findings : [])])
+    .map((r) => r.grading_cost_usd)
+    .filter((cost) => typeof cost === 'number');
+  if (costs.length === 0) return null;
+  return Math.round(costs.reduce((sum, cost) => sum + cost, 0) * CENTS_PER_DOLLAR) / CENTS_PER_DOLLAR;
+}
+
+function describeGradingCost(run) {
+  if (typeof run.gradingCostUsd !== 'number') return null;
+  return `Graded ${run.gradedClusterCount} clusters for $${run.gradingCostUsd.toFixed(2)}.`;
+}
+
+function htmlGradingCost(run) {
+  const description = describeGradingCost(run);
+  return description ? ` &middot; ${escapeHtml(description.replace(/\.$/, ''))}` : '';
 }
 
 function listGradingModels(gradedRecommendations) {
@@ -398,6 +425,8 @@ function renderTerminalSummary(run, confirmedRecommendations, reportPath) {
   const lines = [];
   lines.push(`Loupe review: composite grade ${run.compositeGrade} (${run.compositeScore}/100), profile "${run.profile}"`);
   lines.push(`${run.sessionsAnalyzed} sessions analyzed across ${Object.keys(run.categories).length} categories.`);
+  const gradingCost = describeGradingCost(run);
+  if (gradingCost) lines.push(gradingCost);
   lines.push('');
 
   for (const letter of Object.keys(CATEGORY_KEYS)) {
@@ -552,7 +581,7 @@ function renderHeader(run) {
   <div class="composite-badge grade-${run.compositeGrade}">${escapeHtml(run.compositeGrade)}</div>
   <div>
     <h1>Loupe review</h1>
-    <p class="meta">Composite score ${run.compositeScore}/100 &middot; profile "${escapeHtml(run.profile)}" (${escapeHtml(weights)}) &middot; ${run.sessionsAnalyzed} sessions analyzed &middot; ${escapeHtml(formatTimestamp(run.generatedAt))}</p>
+    <p class="meta">Composite score ${run.compositeScore}/100 &middot; profile "${escapeHtml(run.profile)}" (${escapeHtml(weights)}) &middot; ${run.sessionsAnalyzed} sessions analyzed${htmlGradingCost(run)} &middot; ${escapeHtml(formatTimestamp(run.generatedAt))}</p>
   </div>
 </header>`;
 }
