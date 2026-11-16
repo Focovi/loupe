@@ -111,7 +111,7 @@ function gradeCluster(category, clusterJson, workDir) {
   const missing = REQUIRED_KEYS.filter((key) => !(key in graded));
   if (missing.length > 0) throw new GradeError({ error: 'graded response missing keys', missing, raw: graded });
 
-  return { ...graded, grading_model: `${model} (${GRADER_SETUP})` };
+  return { ...graded, grading_model: `${model} (${GRADER_SETUP})`, grading_cost_usd: costOf(envelope) };
 }
 
 function resolveGradeModel(env) {
@@ -206,6 +206,11 @@ function findExecutableOnPath(names, env) {
     }
   }
   return null;
+}
+
+/** What claude -p says the call cost, or null when it reports nothing. */
+function costOf(envelope) {
+  return typeof envelope.total_cost_usd === 'number' ? envelope.total_cost_usd : null;
 }
 
 /**

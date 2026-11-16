@@ -120,6 +120,7 @@ function mergeFindings([primary, ...duplicates]) {
       recommendation: f.recommendation,
       proposed_artifact: f.proposed_artifact,
       evidence_session_ids: f.evidence_session_ids || [],
+      grading_cost_usd: f.grading_cost_usd,
     })),
   };
 }

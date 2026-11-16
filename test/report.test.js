@@ -110,3 +110,21 @@ test('the summary shows at most five findings', () => {
 
   assert.match(summaryFor(recs), /Top recommendations \(5\)/);
 });
+
+test('the run adds up what grading cost, merged duplicates included', () => {
+  const merged = { category: 'B', recommendation: 'Fix it.', grading_cost_usd: 0.1, merged_findings: [{ grading_cost_usd: 0.05 }] };
+  const rejected = { category: 'A', recommendation: null, rejected_reason: 'no', grading_cost_usd: 0.026 };
+
+  const run = buildRun({ candidates: candidatesWith({ A: 1, B: 2 }), gradedRecommendations: [merged, rejected], profileName: 'balanced', dialWeights: BALANCED });
+
+  assert.equal(run.gradingCostUsd, 0.18);
+  assert.equal(run.gradedClusterCount, 3);
+  assert.match(renderTerminalSummary(run, [], 'report.html'), /Graded 3 clusters for \$0\.18\./);
+});
+
+test('a run graded before costs were recorded shows no cost', () => {
+  const run = buildRun({ candidates: candidatesWith({ B: 2 }), gradedRecommendations: graded('B', 1, 1), profileName: 'balanced', dialWeights: BALANCED });
+
+  assert.equal(run.gradingCostUsd, null);
+  assert.doesNotMatch(renderTerminalSummary(run, [], 'report.html'), /clusters for \$/);
+});
