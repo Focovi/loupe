@@ -28,15 +28,15 @@ with a lead" at the end, and needs no new review run.
 
 ## Reporting progress (read this before Step 1)
 
-A full run makes up to 20 real, sequential `claude -p` calls in Step 4, each
-taking anywhere from 15 seconds to over a minute. **Nothing about this skill
-is fast, and none of it streams on its own** — a Bash tool call's output
-only appears once that call finishes, so if you silently run the steps below
-back to back, the user sees nothing happen for several minutes and has no
-way to tell a real run apart from a hang. Narrate as you go: a one-line text
-message (not a tool call) before each numbered step below, and — this is the
-important one — **a one-line update after every single grading call in Step
-4**, not just at the end of the batch. Treat silence during Step 4 as a bug.
+A full run makes up to 20 real `claude -p` calls in Step 4, four at a
+time, each taking anywhere from 15 seconds to a few minutes. **Nothing about
+this skill is fast, and none of it streams on its own** — a Bash tool call's
+output only appears once that call finishes, so if you silently run the
+steps below back to back, the user sees nothing happen for several minutes
+and has no way to tell a real run apart from a hang. Narrate as you go: a
+one-line text message (not a tool call) before each numbered step below,
+and — this is the important one — **the progress lines after every batch in
+Step 4**, not just at the end. Treat silence during Step 4 as a bug.
 
 ## Steps
 
@@ -50,9 +50,10 @@ important one — **a one-line update after every single grading call in Step
    itself (§3, "self-referential exclusion").
 
 2. **Run the heuristic pre-filtering pass.** Tell the user you're scanning
-   session history. Run:
+   session history. Make a temp folder for this run (call it `<run dir>`)
+   and run:
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/heuristics.js"
+   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/heuristics.js" > <run dir>/heuristics.json
    ```
    By default this is **incremental** — if a prior run exists in
    `~/.loupe/runs/`, only sessions active since that run's timestamp get
@@ -68,7 +69,7 @@ important one — **a one-line update after every single grading call in Step
    scan is the only way to re-derive self-referential exclusions from
    scratch in that case).
 
-   Capture the JSON it prints — it has a `candidates` object keyed
+   Read the JSON it wrote — it has a `candidates` object keyed
    `A_guidelines` through `G_sessionHygiene`, each an array of candidate
    clusters. These are cheap structural pre-filters, not final
    recommendations — some will get rejected in the next step once an LLM
@@ -100,44 +101,47 @@ important one — **a one-line update after every single grading call in Step
    per category (`skippedByCategory`), e.g. "graded 20 of 143 candidates;
    skipped 40 multi-agent and 83 skills candidates past their share".
 
-4. **Grade each queued cluster, narrating as you go.** This step is the
+4. **Grade the queue in batches, narrating as you go.** This step is the
    entire wall-clock cost of a run, so it's the one place silence reads as
    broken. Before starting, tell the user how many clusters are queued
-   ("Grading 14 candidates, this takes a few minutes..."). Then for each
-   `{categoryLetter, cluster}` pair, in order:
+   ("Grading 14 candidates, four at a time, this takes a few minutes...").
+   Then run batches, starting at 0:
    ```
-   echo '<cluster JSON>' | node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/grade.js" <categoryLetter>
+   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/grade-batch.js" <run dir>/heuristics.json --out <run dir>/graded --start 0
    ```
-   If the cluster JSON contains a single quote, write it to a temp file
-   and run `node .../grade.js <categoryLetter> < <file>` instead. Always
-   call it through `node`: `grade.js` works the same on macOS, Linux and
-   Windows, and pins the grading model so every developer's grades are
-   comparable. Never pass a different model unless the user asks.
-   and **immediately after that call returns, before starting the next
-   one**, post a single short line: `[i/total] <category label>:
-   accepted` / `rejected (<short reason>)` / `error`. That line is a plain
-   text message, not a tool call, so the user actually sees it appear
-   between calls instead of after a long gap. Two non-fatal outcomes are
-   expected and should not stop the run:
-   - The graded response has `"recommendation": null` with a
-     `rejected_reason` — the LLM looked at the actual evidence and decided
-     the heuristic was wrong. Drop it, but keep the reason around for the
-     progress line above and in case the terminal summary wants to mention
-     how many were screened out this way.
-   - `grade.js` exits non-zero (a `claude -p` failure or a malformed model
-     response) — log it, say so in the progress line, and continue with the
-     rest of the queue. One bad grading call should never abort the whole
-     run.
+   Each call grades the next four clusters side by side with `grade.js`,
+   which pins the grading model so every developer's grades are
+   comparable (never pass a different model unless the user asks). It
+   prints one line per cluster, `[i/total] <category label>: accepted`,
+   `rejected (<reason>)` or `error (<reason>)`, then either
+   `next: --start N` or `done`. **Immediately after each call returns,
+   relay its progress lines** as a plain text message, not a tool call, so
+   the user sees progress between batches. Then run the next batch with the
+   `--start` it printed, until it prints `done`. Always call it through
+   `node`; it works the same on macOS, Linux and Windows.
 
-5. **Collect the results.** Gather every successfully graded, non-rejected
-   recommendation into a single list. Each has
+   Two non-fatal outcomes are expected and should not stop the run:
+   - `rejected`: the LLM looked at the actual evidence and decided the
+     heuristic was wrong. Keep the count in case the terminal summary wants
+     to mention how many were screened out this way.
+   - `error`: a `claude -p` failure or a malformed model response. The
+     details are in `<run dir>/graded/NN.err`. Carry on with the rest of the
+     queue; one bad grading call should never abort the whole run. A
+     cluster with a result is skipped if its batch runs again, so re-running
+     a batch after an interruption only grades what is missing.
+
+5. **Collect the results.** Run:
+   ```
+   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/grade-batch.js" --collect --out <run dir>/graded > <run dir>/graded.json
+   ```
+   That is every graded result, accepted and rejected, in queue order. Each
+   accepted one has
    `{category, evidence_session_ids, recommendation, proposed_artifact, apply_prompt}`.
 
 6. **Merge duplicate findings.** Tell the user you're merging findings
-   that describe the same habit. Write step 5's full graded array
-   (including rejected ones) to a temp file and run:
+   that describe the same habit. Run:
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/consolidate.js" <graded-recommendations.json> > <consolidated.json>
+   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/consolidate.js" <run dir>/graded.json > <run dir>/consolidated.json
    ```
    Clusters are graded one project at a time, so the same habit in three
    projects comes back as three findings and would cost the category three
@@ -147,12 +151,11 @@ important one — **a one-line update after every single grading call in Step
    says so on stderr; carry on either way.
 
 7. **Score the run and build the report.** Tell the user you're scoring the
-   run and building the report. Write step 2's heuristics output to a temp
-   file and pass step 6's consolidated array (the full graded array,
-   including rejected ones — `report.js` uses rejection counts too) as the
-   graded input, then run:
+   run and building the report. Pass step 6's consolidated array (the full
+   graded array, including rejected ones — `report.js` uses rejection
+   counts too) as the graded input:
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/report.js" --candidates <heuristics-output.json> --graded <consolidated.json>
+   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/report.js" --candidates <run dir>/heuristics.json --graded <run dir>/consolidated.json
    ```
    This computes per-category letter grades and a profile-weighted
    composite grade (§5, §3.5), persists the full run to
