@@ -12,23 +12,27 @@
  * excerpts and apply prompts (the developer still has those locally).
  *
  * Usage:
- *   node export.js [--run <run json path>] [--as <name>] [--redact "term1,term2"] [--out <path>]
+ *   node export.js [--run <run json path>] [--as <name>] [--redact "term1,term2"] [--remember] [--out <path>]
  *
- * --run     defaults to the most recent run in ~/.loupe/runs/
- * --as      the name the lead sees; defaults to exportName in
- *           ~/.loupe/config.json, else "unnamed"
- * --redact  extra terms (client or coworker names) to replace, added to
- *           exportRedact in ~/.loupe/config.json
- * --out     defaults to ~/.loupe/exports/<run timestamp>.json
+ * --run       defaults to the most recent run in ~/.loupe/runs/
+ * --as        the name the lead sees; defaults to exportName in
+ *             ~/.loupe/config.json, then git's global user.name
+ * --redact    extra terms (client or coworker names) to replace, added to
+ *             exportRedact and the files in exportRedactFiles (a shared
+ *             team list, one term per line) in ~/.loupe/config.json
+ * --remember  saves the name and the --redact terms to ~/.loupe/config.json
+ * --out       defaults to ~/.loupe/exports/<run timestamp>.json
  *
- * Prints a preview of exactly what was written, then the file path as the
- * last line.
+ * Prints a preview of exactly what was written, including capitalized
+ * words that may be names nobody listed, then the file path as the last
+ * line.
  */
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createScrubber } = require('./scrub');
+const { resolveDeveloperName, collectRedactTerms, findPossibleNames, rememberChoices } = require('./export-setup');
 
 const LOUPE_DIR = path.join(os.homedir(), '.loupe');
 const RUNS_DIR = path.join(LOUPE_DIR, 'runs');
@@ -36,7 +40,6 @@ const EXPORTS_DIR = path.join(LOUPE_DIR, 'exports');
 const CONFIG_FILE = path.join(LOUPE_DIR, 'config.json');
 
 const EXPORT_SCHEMA = 'loupe-export/1';
-const UNNAMED_DEVELOPER = 'unnamed';
 const SESSIONS_PER_RATE = 10;
 
 const CATEGORY_LABELS = {
@@ -57,15 +60,25 @@ function main() {
   if (!runPath) fail('No Loupe runs found in ~/.loupe/runs/. Run /loupe:review first.');
   const run = readJson(runPath);
 
-  const redactTerms = [...(config.exportRedact || []), ...splitList(args.redact)];
-  const developer = args.as || config.exportName || UNNAMED_DEVELOPER;
+  const extraTerms = splitList(args.redact);
+  const { terms: redactTerms, unreadableFiles } = collectRedactTerms(
+    { ...config, exportRedactFiles: (config.exportRedactFiles || []).map(expandHome) },
+    extraTerms,
+  );
+  const developer = resolveDeveloperName(args.as, config);
   const exported = buildExport(run, developer, redactTerms);
+
+  if (args.remember) {
+    fs.mkdirSync(LOUPE_DIR, { recursive: true });
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(rememberChoices(config, { name: developer, redactTerms: extraTerms }), null, 2) + '\n');
+  }
 
   const outPath = args.out || path.join(EXPORTS_DIR, path.basename(runPath));
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, JSON.stringify(exported, null, 2) + '\n');
 
-  process.stdout.write(renderPreview(exported) + '\n' + outPath + '\n');
+  const notes = { possibleNames: findPossibleNames(exported), unreadableFiles, remembered: Boolean(args.remember) };
+  process.stdout.write(renderPreview(exported, notes) + '\n' + outPath + '\n');
 }
 
 function buildExport(run, developer, redactTerms) {
@@ -123,7 +136,7 @@ function ratePer10Sessions(count, sessions) {
   return Math.round((count / sessions) * SESSIONS_PER_RATE * 10) / 10;
 }
 
-function renderPreview(exported) {
+function renderPreview(exported, notes = {}) {
   const lines = [
     `Loupe export for "${exported.developer}" (run ${exported.runGeneratedAt}, ${exported.sessionsAnalyzed} sessions)`,
     '',
@@ -146,8 +159,13 @@ function renderPreview(exported) {
     '',
     `${exported.replacementCount} item(s) were replaced (secrets, emails, URLs, IPs, home paths, redact terms).`,
     'Read the findings above before sharing. Client or coworker names are only removed if they are',
-    'in --redact or exportRedact in ~/.loupe/config.json.',
+    'in --redact, exportRedact or an exportRedactFiles list in ~/.loupe/config.json.',
   );
+  if (notes.possibleNames && notes.possibleNames.length > 0) {
+    lines.push('', `Possible names still in the findings: ${notes.possibleNames.join(', ')}`);
+  }
+  for (const file of notes.unreadableFiles || []) lines.push(`Could not read redact list ${file}; its terms were not applied.`);
+  if (notes.remembered) lines.push(`Saved the name "${exported.developer}" and the --redact terms to ~/.loupe/config.json.`);
   return lines.join('\n');
 }
 
@@ -165,17 +183,28 @@ function findLatestRunPath() {
 }
 
 function splitList(value) {
-  return value ? value.split(',') : [];
+  return value ? value.split(',').map((term) => term.trim()).filter(Boolean) : [];
 }
+
+const BOOLEAN_FLAGS = new Set(['remember']);
 
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
     if (!argv[i].startsWith('--')) continue;
-    args[argv[i].slice(2)] = argv[i + 1];
+    const name = argv[i].slice(2);
+    if (BOOLEAN_FLAGS.has(name)) {
+      args[name] = true;
+      continue;
+    }
+    args[name] = argv[i + 1];
     i++;
   }
   return args;
+}
+
+function expandHome(filePath) {
+  return filePath.replace(/^~(?=$|[\\/])/, os.homedir());
 }
 
 function readJson(filePath) {

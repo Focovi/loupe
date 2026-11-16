@@ -85,9 +85,19 @@ Ask Claude to "export my Loupe review" (or run `/loupe:review --export`).
 counts, gap findings per 10 sessions, and each finding's recommendation and
 proposed artifact. Session IDs, paths, branches, prompt excerpts and apply
 prompts are dropped. Secrets, emails, URLs, IPs and home paths are replaced.
-Client and coworker names are only replaced if you list them with
-`--redact` or `exportRedact` in `~/.loupe/config.json`, so read the preview
-before you send the file.
+Client and coworker names are only replaced if you list them, so the
+preview also lists capitalized words in the findings that may be names, and
+Claude asks which to redact. List them with `--redact`, `exportRedact` in
+`~/.loupe/config.json`, or a shared team file named in `exportRedactFiles`
+(one term per line):
+
+```json
+{ "exportName": "Sam Lee", "exportRedact": ["Acme"], "exportRedactFiles": ["~/team/loupe-redact.txt"] }
+```
+
+The name defaults to git's global `user.name`; `--remember` saves the name
+and `--redact` terms for next time. Read the preview before you send the
+file.
 
 A lead combines the exports they receive with `aggregate.js <folder>`, which
 prints a Markdown team view with guidance for each developer.
