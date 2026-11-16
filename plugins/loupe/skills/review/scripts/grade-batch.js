@@ -27,7 +27,9 @@ const { spawn } = require('child_process');
 const { CATEGORY_LABELS } = require('./export');
 
 const GRADE_SCRIPT = path.join(__dirname, 'grade.js');
-const DEFAULT_BATCH_SIZE = 4;
+// Measured on a 20-cluster queue: 4 at a time took 113 s, 6 took 93 s and
+// 8 took 73 s, with no errors and no batch over 30 s.
+const DEFAULT_BATCH_SIZE = 8;
 const REASON_MAX_CHARS = 100;
 const RESULT_NAME_DIGITS = 2;
 
