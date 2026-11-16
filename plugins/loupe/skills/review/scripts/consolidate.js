@@ -18,7 +18,7 @@
  */
 
 const fs = require('fs');
-const { callClaude, extractJson, markSessionAsSelf, resolveGradeModel } = require('./grade');
+const { callClaude, readAnswer, resolveGradeModel } = require('./grade');
 
 const MIN_FINDINGS_TO_CONSOLIDATE = 2;
 const PROMPT_FIELD_MAX_CHARS = 1200;
@@ -124,12 +124,17 @@ function mergeFindings([primary, ...duplicates]) {
   };
 }
 
+const GROUPS_SCHEMA = {
+  type: 'object',
+  properties: { groups: { type: 'array', items: { type: 'array', items: { type: 'integer' } } } },
+  required: ['groups'],
+};
+
 function groupWithClaude(prompt, model) {
   try {
-    const envelope = callClaude(prompt, model);
-    if (envelope.session_id) markSessionAsSelf(envelope.session_id);
+    const envelope = callClaude(prompt, model, GROUPS_SCHEMA);
     if (envelope.is_error) return null;
-    return extractJson(envelope.result);
+    return readAnswer(envelope);
   } catch (err) {
     process.stderr.write(`consolidate: ${err.message}\n`);
     return null;

@@ -39,7 +39,17 @@ Every candidate is graded by one headless `claude -p` call on a pinned
 model, `claude-sonnet-5-5`, never the model of the session you run
 `/loupe:review` from. Grades from different models are not comparable, so
 everyone on a team should grade with the same ID: leave
-`LOUPE_GRADE_MODEL` unset unless the whole team repins together. Each run
+`LOUPE_GRADE_MODEL` unset unless the whole team repins together.
+
+The call runs isolated from your own setup: no settings, CLAUDE.md,
+plugins, skills, MCP servers, hooks or tools, Loupe's own system prompt, a
+pinned effort level (`medium`), a JSON schema for the answer, a cost cap
+per call, and no saved session. So your configuration never sways your
+grades, each call carries about 1,300 tokens of overhead instead of about
+50,000, and grading leaves no transcripts behind for the next review.
+Runs record the setup with the model (`claude-sonnet-5-5 (isolated
+grader, medium effort)`), so the report warns when you compare against a
+run graded before this change. Each run
 records the model it used (`gradingModels` in `~/.loupe/runs/*.json` and in
 exports), the terminal summary warns when it differs from your previous
 run, and the team view warns when exports were graded with different
