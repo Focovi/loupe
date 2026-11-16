@@ -15,6 +15,12 @@
  * Reads one candidate cluster as JSON on stdin, prints one graded
  * recommendation as JSON on stdout: {category, evidence_session_ids,
  * recommendation, proposed_artifact, apply_prompt, grading_model}.
+ *
+ * The call runs isolated from the developer's own setup: no settings,
+ * CLAUDE.md, plugins, skills, MCP servers, hooks or tools, Loupe's own
+ * system prompt, a pinned effort level, and a JSON schema for the answer.
+ * That keeps it cheap (about 1,300 tokens of overhead instead of 50,000)
+ * and makes every developer's grades come from the same grader.
  * Exits 1 with a JSON error on stderr when anything fails.
  */
 
@@ -29,8 +35,34 @@ const { spawnSync, execFileSync } = require('child_process');
 // comparable; the ID is recorded on each graded result so the team view
 // can tell. Override with LOUPE_GRADE_MODEL only to repin deliberately.
 const DEFAULT_GRADE_MODEL = 'claude-sonnet-5-5';
+// Pinned for the same reason as the model: otherwise the call inherits the
+// effort of whichever session started the review.
+const GRADE_EFFORT = 'medium';
+// Recorded with the model, so runs graded before the grader was isolated
+// show up as a different grading setup in the report and the team view.
+const GRADER_SETUP = 'isolated grader, medium effort';
+// A safety cap per call. A full grading prompt costs well under this.
+const MAX_CALL_BUDGET_USD = '2';
+// Plain words only: on Windows this reaches cmd.exe for claude.cmd.
+const GRADER_SYSTEM_PROMPT =
+  'You are the grader for Loupe. Follow the instructions in the user message and answer only with the JSON object it asks for.';
+const NULLABLE_STRING = { type: ['string', 'null'] };
+const GRADE_SCHEMA = {
+  type: 'object',
+  properties: {
+    category: { type: 'string' },
+    evidence_session_ids: { type: 'array', items: { type: 'string' } },
+    is_gap: { type: ['boolean', 'null'] },
+    title: NULLABLE_STRING,
+    recommendation: NULLABLE_STRING,
+    proposed_artifact: {},
+    apply_prompt: NULLABLE_STRING,
+    rejected_reason: { type: 'string' },
+  },
+  required: ['category', 'evidence_session_ids'],
+};
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const REQUIRED_KEYS = ['category', 'evidence_session_ids'];
+const REQUIRED_KEYS = GRADE_SCHEMA.required;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const EXIT_FAILURE = 1;
 
@@ -71,20 +103,15 @@ function gradeCluster(category, clusterJson, workDir) {
   fs.writeFileSync(digestFile, runNode([HEURISTICS_SCRIPT, '--digest', sessionIds.join(',')]));
   const prompt = runNode([PROMPT_SCRIPT, category, clusterFile, digestFile]);
 
-  const envelope = callClaude(prompt, model);
+  const envelope = callClaude(prompt, model, GRADE_SCHEMA);
   if (envelope.is_error) throw new GradeError({ error: 'claude -p call failed', detail: envelope });
 
-  // The grading call itself creates a new Claude Code session — exclude it
-  // from future Loupe runs the same way the orchestrating skill session is
-  // excluded (§3 self-referential exclusion).
-  if (envelope.session_id) markSessionAsSelf(envelope.session_id);
-
-  const graded = extractJson(envelope.result);
+  const graded = readAnswer(envelope);
   if (!graded) throw new GradeError({ error: 'model did not return valid JSON', raw: envelope.result });
   const missing = REQUIRED_KEYS.filter((key) => !(key in graded));
   if (missing.length > 0) throw new GradeError({ error: 'graded response missing keys', missing, raw: graded });
 
-  return { ...graded, grading_model: model };
+  return { ...graded, grading_model: `${model} (${GRADER_SETUP})` };
 }
 
 function resolveGradeModel(env) {
@@ -99,12 +126,28 @@ function runNode(args) {
   return execFileSync(process.execPath, args, { encoding: 'utf8', maxBuffer: MAX_OUTPUT_BYTES });
 }
 
-function callClaude(prompt, model) {
-  // No tool access: this is a pure text-in/text-out grading call, and
-  // denying tools keeps it fast, cheap, and unable to recurse into Loupe's
-  // own scripts. The prompt goes on stdin: --allowedTools takes a list
-  // and would swallow a trailing prompt argument.
-  const claudeArgs = ['-p', '--model', model, '--output-format', 'json', '--allowedTools', ''];
+/**
+ * One isolated, structured `claude -p` call. No tools keeps it a pure
+ * text-in/text-out call that can't recurse into Loupe's own scripts. No
+ * session persistence means it leaves no transcript for the next review
+ * to filter out. The prompt goes on stdin: --tools takes a list and would
+ * swallow a trailing prompt argument.
+ */
+function callClaude(prompt, model, schema) {
+  const claudeArgs = [
+    '-p',
+    '--model', model,
+    '--effort', GRADE_EFFORT,
+    '--output-format', 'json',
+    '--json-schema', JSON.stringify(schema),
+    '--system-prompt', GRADER_SYSTEM_PROMPT,
+    '--tools', '',
+    '--setting-sources', '',
+    '--strict-mcp-config',
+    '--disable-slash-commands',
+    '--no-session-persistence',
+    '--max-budget-usd', MAX_CALL_BUDGET_USD,
+  ];
   const invocation = buildClaudeInvocation(claudeArgs, { platform: process.platform, env: process.env });
   const result = spawnSync(invocation.command, invocation.args, {
     input: prompt,
@@ -146,10 +189,12 @@ function buildClaudeInvocation(claudeArgs, { platform, env, findOnPath = findExe
   };
 }
 
-// Every argument here is a fixed flag, a validated model ID or a path, so
-// plain double quoting is enough; an empty argument becomes "".
+// Every argument here is a fixed flag, a validated model ID, a path, the
+// plain-words system prompt or the schema JSON, none with cmd.exe's special
+// characters, so double quoting with escaped inner quotes is enough; an
+// empty argument becomes "".
 function quoteForCmd(arg) {
-  return /^[A-Za-z0-9._:\\/-]+$/.test(arg) ? arg : `"${arg}"`;
+  return /^[A-Za-z0-9._:\\/-]+$/.test(arg) ? arg : `"${arg.replace(/"/g, '\\"')}"`;
 }
 
 function findExecutableOnPath(names, env) {
@@ -163,12 +208,13 @@ function findExecutableOnPath(names, env) {
   return null;
 }
 
-function markSessionAsSelf(sessionId) {
-  try {
-    execFileSync(process.execPath, [HEURISTICS_SCRIPT, '--mark-self', sessionId], { stdio: 'ignore' });
-  } catch (err) {
-    // non-fatal — worst case this grading session gets analyzed next run
-  }
+/**
+ * The schema-checked answer, or for a Claude Code that returns none, the
+ * JSON found in the reply text.
+ */
+function readAnswer(envelope) {
+  if (envelope.structured_output && typeof envelope.structured_output === 'object') return envelope.structured_output;
+  return extractJson(envelope.result);
 }
 
 /**
@@ -208,4 +254,13 @@ function fail(payload) {
 
 if (require.main === module) main();
 
-module.exports = { extractJson, buildClaudeInvocation, resolveGradeModel, callClaude, markSessionAsSelf, GradeError, DEFAULT_GRADE_MODEL };
+module.exports = {
+  extractJson,
+  readAnswer,
+  buildClaudeInvocation,
+  resolveGradeModel,
+  callClaude,
+  GradeError,
+  DEFAULT_GRADE_MODEL,
+  GRADE_SCHEMA,
+};

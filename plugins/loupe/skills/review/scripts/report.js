@@ -386,7 +386,7 @@ function describeGradingModelChange(run) {
   const previous = run.deltas.previousGradingModels.join(', ') || 'an unrecorded model';
   const current = run.gradingModels.join(', ');
   if (previous === current) return null;
-  return `Graded with ${current}; the previous run used ${previous}, so the deltas mix two models.`;
+  return `Graded with ${current}; the previous run used ${previous}, so the deltas mix two grading setups.`;
 }
 
 function describeScoringChange(run) {
