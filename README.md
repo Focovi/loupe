@@ -82,5 +82,8 @@ prints a Markdown team view with guidance for each developer.
 
 ## Status
 
-Pre-build. See the [Loupe project hub](https://app.notion.com/p/3a604596974b81ee8877eac1e2a252e8)
+Usable, in early trials. The review, the scrubbed export and the team view
+all work, with unit tests for the scrubber, export, aggregation, grouping,
+grading and detectors. Windows support is covered by unit tests only and
+has not yet been run on a Windows machine. See the [Loupe project hub](https://app.notion.com/p/3a604596974b81ee8877eac1e2a252e8)
 in Notion for the full spec, build phases, and task backlog.

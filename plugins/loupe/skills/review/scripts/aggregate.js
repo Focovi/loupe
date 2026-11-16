@@ -203,4 +203,6 @@ function fail(message) {
   process.exit(1);
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { combineByDeveloper, renderMarkdown };
