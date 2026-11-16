@@ -22,7 +22,9 @@ Step 2 as `--repo <name-or-path>` and/or `--branch <name>`. `--repo`
 accepts either a `~/.loupe/groups.json` project name (the common case,
 e.g. `Sidelit`) or a literal path for one specific repo/worktree. With no
 arguments, the review covers everything (subject to the incremental
-filtering below) — that's the default and normal case.
+filtering below) — that's the default and normal case. `--export` is not a
+scope argument: it means "share my review", covered under "Sharing a review
+with a lead" at the end, and needs no new review run.
 
 ## Reporting progress (read this before Step 1)
 
@@ -142,3 +144,42 @@ important one — **a one-line update after every single grading call in Step
    categories came back empty and whether that's because nothing was found
    or because everything got rejected at grading — those mean different
    things.
+
+## Sharing a review with a lead (only when asked)
+
+Run this only when the user asks to export, share or send their review
+(e.g. `/loupe:review --export`, "share this with my lead"). Never export on
+your own initiative: the export leaves the user's machine, and they decide
+what goes.
+
+1. Ask which name the lead should see, unless `exportName` is set in
+   `~/.loupe/config.json`, and whether any client or coworker names appear
+   in their findings. Those have no recognizable shape, so the scrubber only
+   removes them when listed.
+2. Run:
+   ```
+   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/export.js" --as "<name>" [--redact "Client A,Coworker B"] [--run <run json path>]
+   ```
+   With no `--run`, it exports the most recent run. It writes
+   `~/.loupe/exports/<run timestamp>.json` and prints a preview of exactly
+   what was written; the last line is the file path.
+3. Show the user the preview verbatim and ask them to read every finding
+   before sending the file. If something should not leave, re-run with more
+   `--redact` terms. The file goes wherever the user sends it; you never
+   send it yourself.
+
+Runs are incremental, so one export covers only the sessions since the
+previous run. A developer who reviews often can send several exports; the
+team view sums them.
+
+## Building a team view (for a lead)
+
+When a lead asks to combine exports they received:
+```
+node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/aggregate.js" <folder or files...> [--json]
+```
+It prints Markdown: gap findings per 10 sessions for each developer and
+category, categories where two or more developers have gaps, and each
+developer's findings as guidance plus good habits to keep. Relay it as is.
+Rates are per 10 sessions because letter grades drop as session counts
+rise, so grades are not comparable between people.
