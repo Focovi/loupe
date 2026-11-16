@@ -71,23 +71,18 @@ const HYGIENE_SLOPE_THRESHOLD = 0.15;
 const EXPENSIVE_MODEL_PATTERN = /opus/i;
 const CHEAP_MODEL_PATTERN = /haiku/i;
 const REAL_MODEL_NAME_PATTERN = /claude/i;
-// Same-tool/different-target runs are a coarse, over-inclusive proxy for
-// "independent work chunks" — pure tool-call structure can't distinguish
-// genuinely independent audits from a sequential grep/find chain that
-// converges on one answer. True independence judgment is deferred to
-// grade.sh (§3); isCleanIndependentRun() below screens out the specific
-// failure pattern Phase 6 validation actually observed (revisited
-// targets), which lets this match §2's own example length (3: "audit file
-// A, then file B, then file C") instead of padding the threshold to
-// compensate for a weaker filter.
-const INDEPENDENT_RUN_MIN_LENGTH = 3;
+// A long stretch of lookups in the main session, one round trip after
+// another, is exploration a subagent could run and hand back as a summary,
+// keeping the main context for the work itself. Short runs are not: grading
+// rejected three or four quick reads every time, since a subagent costs
+// more than they do.
+const MIN_EXPLORATION_ROUND_TRIPS = 10;
 // Claude Code renamed the subagent tool from Task to Agent; transcripts
 // from either era must count, or every session reads as "never delegated".
 const SUBAGENT_TOOL_NAMES = new Set(['Task', 'Agent']);
-// Only lookups can be independent chunks. Consecutive Bash calls with
-// different commands are almost always one dependent pipeline (build,
-// test, commit), and counting them flagged most sessions as parallelizable.
-const INDEPENDENT_LOOKUP_TOOL_NAMES = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']);
+// Only lookups count as exploration. Other Bash calls (build, test,
+// commit) are the work itself.
+const LOOKUP_TOOL_NAMES = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']);
 const READ_ONLY_BASH_PATTERN = /^\s*(cat|head|tail|sed -n|grep|rg|ls|find|wc|jq|git (log|show|diff|blame)|gh (pr|issue|run) (view|list|diff))\b/;
 const TRIVIAL_SUBAGENT_PROMPT_MAX_CHARS = 200;
 
@@ -944,39 +939,44 @@ function detectModelRoutingCandidates(groupedSessions) {
 
 // One cluster per project and signal, not per session: the grader judges a
 // habit better from several examples, and per-session clusters let this
-// category crowd every other one out of the grading queue.
+// category crowd every other one out of the grading queue. Long exploration
+// needs MIN_CLUSTER_SIZE sessions to be a habit rather than a one-off.
 function detectAgentParallelismCandidates(groupedSessions) {
   const clusters = [];
 
   for (const [groupName, sessions] of groupedSessions) {
-    const serialSessions = [];
+    const exploringSessions = [];
     const trivialDelegationSessions = [];
     for (const session of sessions) {
-      const subagentPrompts = collectSubagentPrompts(session);
-      const independentChunks = countIndependentSerialChunks(session);
-
-      if (subagentPrompts.length === 0 && independentChunks >= MIN_CLUSTER_SIZE) {
-        serialSessions.push({ sessionId: session.sessionId, independentChunks });
-      }
-      if (subagentPrompts.length > 0 && independentChunks === 0 && subagentPrompts.every(isTrivialSubagentPrompt)) {
-        trivialDelegationSessions.push({ sessionId: session.sessionId, independentChunks });
-      }
+      const roundTrips = longestExplorationRoundTrips(session);
+      const flagged = { sessionId: session.sessionId, roundTrips };
+      if (roundTrips >= MIN_EXPLORATION_ROUND_TRIPS) exploringSessions.push(flagged);
+      if (delegatesOnlyTrivialWork(session)) trivialDelegationSessions.push(flagged);
     }
-    if (serialSessions.length > 0) clusters.push(buildAgentCluster(groupName, 'serial-independent-work', serialSessions));
-    if (trivialDelegationSessions.length > 0) clusters.push(buildAgentCluster(groupName, 'subagents-for-trivial-work', trivialDelegationSessions));
+    if (new Set(exploringSessions.map((entry) => entry.sessionId)).size >= MIN_CLUSTER_SIZE) {
+      clusters.push(buildAgentCluster(groupName, 'long-exploration-in-main-session', exploringSessions));
+    }
+    if (trivialDelegationSessions.length > 0) {
+      clusters.push(buildAgentCluster(groupName, 'subagents-for-trivial-work', trivialDelegationSessions));
+    }
   }
 
   return clusters;
 }
 
 function buildAgentCluster(groupName, signal, flaggedSessions) {
-  const ranked = [...flaggedSessions].sort((a, b) => b.independentChunks - a.independentChunks);
+  const ranked = [...flaggedSessions].sort((a, b) => b.roundTrips - a.roundTrips);
   return {
     group: groupName,
     signal,
-    independentChunks: ranked[0].independentChunks,
+    longestExplorationRoundTrips: ranked[0].roundTrips,
     ...cappedEvidence(ranked.map((entry) => entry.sessionId)),
   };
+}
+
+function delegatesOnlyTrivialWork(session) {
+  const prompts = collectSubagentPrompts(session);
+  return prompts.length > 0 && prompts.every(isTrivialSubagentPrompt);
 }
 
 function collectSubagentPrompts(session) {
@@ -995,68 +995,38 @@ function isTrivialSubagentPrompt(prompt) {
   return prompt.length <= TRIVIAL_SUBAGENT_PROMPT_MAX_CHARS;
 }
 
-function countIndependentSerialChunks(session) {
-  const toolCalls = flattenToolCalls(session);
-  const runs = findSameToolDifferentTargetRuns(toolCalls);
-  return runs.filter((run) => isCleanIndependentRun(run, toolCalls)).length;
-}
-
-function findSameToolDifferentTargetRuns(toolCalls) {
-  if (toolCalls.length === 0) return [];
-  const runs = [];
-  let currentRun = [toolCalls[0]];
-
-  for (let i = 1; i < toolCalls.length; i++) {
-    if (isSameToolDifferentTarget(toolCalls[i - 1], toolCalls[i])) {
-      currentRun.push(toolCalls[i]);
+// The most lookup round trips in a row, with no other tool call and no
+// person turn between them. Lookups sent together in one message wait for
+// one round trip, so they count once.
+function longestExplorationRoundTrips(session) {
+  let longest = 0;
+  let current = 0;
+  let isRoundTripOpen = false;
+  for (const turn of session.turns) {
+    if (isPersonTypedTurn(turn)) current = 0;
+    if (turn.isToolResultTurn || isPersonTypedTurn(turn)) {
+      isRoundTripOpen = false;
       continue;
     }
-    if (currentRun.length >= INDEPENDENT_RUN_MIN_LENGTH) runs.push(currentRun);
-    currentRun = [toolCalls[i]];
-  }
-  if (currentRun.length >= INDEPENDENT_RUN_MIN_LENGTH) runs.push(currentRun);
-  return runs;
-}
-
-// Phase 6 validation: every real F candidate graded got rejected, and the
-// common thread was a target getting touched again later in the session —
-// a shared debug loop mutating one config file, a design-review edit
-// sequence revisited after a build check. Genuinely independent, one-shot
-// work doesn't need revisiting. This can't prove independence (heuristics
-// alone can't, per §2), but it directly screens out the failure pattern
-// grading actually observed, trading recall for precision on purpose.
-function isCleanIndependentRun(run, allToolCalls) {
-  const runTargets = new Set(run.map((call) => call.target));
-  return !allToolCalls.some((call) => !run.includes(call) && runTargets.has(call.target));
-}
-
-function flattenToolCalls(session) {
-  const toolCalls = [];
-  for (const turn of session.turns) {
     for (const toolUse of turn.toolUses) {
-      toolCalls.push({ name: toolUse.name, target: extractToolTarget(toolUse), isLookup: isLookupToolUse(toolUse) });
+      if (!isLookupToolUse(toolUse)) {
+        current = 0;
+        isRoundTripOpen = true;
+        continue;
+      }
+      if (isRoundTripOpen) continue;
+      current++;
+      isRoundTripOpen = true;
+      longest = Math.max(longest, current);
     }
   }
-  return toolCalls;
-}
-
-function extractToolTarget(toolUse) {
-  const input = toolUse.input || {};
-  if (typeof input.file_path === 'string') return input.file_path;
-  if (typeof input.path === 'string') return input.path;
-  if (typeof input.pattern === 'string') return input.pattern;
-  if (typeof input.command === 'string') return input.command.slice(0, 80);
-  return null;
+  return longest;
 }
 
 function isLookupToolUse(toolUse) {
-  if (INDEPENDENT_LOOKUP_TOOL_NAMES.has(toolUse.name)) return true;
+  if (LOOKUP_TOOL_NAMES.has(toolUse.name)) return true;
   const command = toolUse.name === 'Bash' && toolUse.input ? toolUse.input.command : null;
   return typeof command === 'string' && READ_ONLY_BASH_PATTERN.test(command);
-}
-
-function isSameToolDifferentTarget(callA, callB) {
-  return callA.isLookup && callB.isLookup && callA.name === callB.name && callA.target !== null && callB.target !== null && callA.target !== callB.target;
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,10 +1221,11 @@ module.exports = {
   followsFileEditTool,
   isManualWorkTurn,
   collectUsedMcpServers,
-  countIndependentSerialChunks,
+  longestExplorationRoundTrips,
   isPersonTypedTurn,
   detectGuidelineCandidates,
   detectSkillCandidates,
+  detectAgentParallelismCandidates,
   detectSessionHygieneCandidates,
   correctionRateSlope,
   buildDigestBundle,
