@@ -206,4 +206,4 @@ function fail(payload) {
 
 if (require.main === module) main();
 
-module.exports = { extractJson, buildClaudeInvocation, resolveGradeModel, DEFAULT_GRADE_MODEL };
+module.exports = { extractJson, buildClaudeInvocation, resolveGradeModel, callClaude, markSessionAsSelf, GradeError, DEFAULT_GRADE_MODEL };

@@ -18,7 +18,7 @@ const RUBRICS = {
   D: 'Category D — MCPs. Either a gap (manual work an already-connected or plausible MCP would remove) or underuse (a connected MCP that never gets called). Name the specific MCP to add or actually use, and which evidence session(s) it would have saved a step in. For a gap, availableMcpServers lists what is already configured, so prefer "use the one you have" when it fits. For underuse, scope says whether the servers are user-wide (judged across sessionsConsidered sessions in every project) or project-level; the digest holds only a sample of the most recent sessions.',
   E: 'Category E — Model routing. Judge whether task complexity matched the model used across the evidence sessions — not to shame a single session, but to describe a "this type of task → this model" pattern worth adopting going forward.',
   F: 'Category F — Single-agent vs multi-agent (Task tool). Judge, from the evidence, whether the flagged work chunks were genuinely independent (a case for spawning parallel subagents next time) or actually sequential/dependent despite superficially similar tool calls (in which case say so plainly and do not recommend parallelizing). Do not assume the heuristic pre-filter was right — the evidence transcript is what you are actually judging. A cluster covers one project: evidenceSessionCount sessions were flagged, and evidenceSessionIds is a sample of them, most independent chunks first. Only lookups (Read, Grep, Glob, web fetches, read-only shell commands) count as independent chunks.',
-  G: 'Category G — Session & memory hygiene. Give a concrete, numeric threshold or trigger observed in the evidence (e.g. "correction rate climbs past X around turn Y") — not a generic "keep sessions short" platitude.',
+  G: 'Category G — Session & memory hygiene. Give a concrete, numeric threshold or trigger observed in the evidence (e.g. "correction rate climbs past X around turn Y") — not a generic "keep sessions short" platitude. For rising-correction-rate, the cluster covers every session in one project whose correction rate rose by at least 0.15 between its first and last 10 typed turns, steepest first; maxSlope and medianSlope summarize them.',
 };
 
 const OUTPUT_CONTRACT = `Respond with ONLY a single JSON object (no markdown fences, no commentary before or after) matching exactly this shape:
@@ -56,7 +56,7 @@ function main() {
     '--- CANDIDATE CLUSTER (from the heuristic pre-filter) ---',
     cluster.trim(),
     '',
-    '--- EVIDENCE DIGEST (condensed session content — human turns and tool names/args only, no full tool outputs) ---',
+    '--- EVIDENCE DIGEST (condensed session content — human turns and tool names/args only, no full tool outputs). sessionsIncluded of sessionsRequested sessions are digested, each sampled to at most maxTurnsPerSession turns from its start and end. ---',
     digest.trim(),
     '',
     OUTPUT_CONTRACT,

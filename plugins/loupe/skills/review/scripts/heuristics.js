@@ -41,13 +41,21 @@ const RUNS_DIR = path.join(LOUPE_DIR, 'runs');
 // Either separator: a Windows session may call the scripts with
 // backslashes (cmd, PowerShell) or forward slashes (Git Bash).
 const LOUPE_SCRIPTS_PATH_PATTERN = /skills[\\/]+review[\\/]+scripts/;
-// Must match the opening line build-grade-prompt.js sends verbatim.
-const LOUPE_GRADING_PROMPT_SIGNATURE = 'grading a candidate recommendation for Loupe';
+// Must match the opening lines build-grade-prompt.js and consolidate.js
+// send verbatim.
+const LOUPE_PROMPT_SIGNATURES = ['grading a candidate recommendation for Loupe', 'merging duplicate findings for Loupe'];
 
 const DUMP_SCHEMA_LINE_COUNT = 8;
 const DIGEST_MAX_TURNS = 80;
 const DIGEST_TEXT_TRUNCATE_CHARS = 300;
 const DIGEST_TOOL_ARG_TRUNCATE_CHARS = 150;
+// A grading prompt holds every digest it is given, so the digest is capped
+// by session count and by total size. Without the caps a 145-session skills
+// cluster built a prompt past the model's context limit. The budget is in
+// characters of digest JSON, roughly 4 per token.
+const DIGEST_MAX_SESSIONS = 10;
+const DIGEST_MAX_CHARS = 360000;
+const DIGEST_MIN_TURNS = 10;
 const SHORT_TURN_MAX_CHARS = 200;
 const MIN_CLUSTER_SIZE = 2;
 // Calibrated against real paraphrased corrections ("use grafana not axiom"
@@ -209,18 +217,33 @@ function dumpSchema() {
 // ---------------------------------------------------------------------------
 
 function printDigest(sessionIds) {
-  const wanted = new Set(sessionIds);
+  const includedIds = sessionIds.slice(0, DIGEST_MAX_SESSIONS);
+  const wanted = new Set(includedIds);
   const files = discoverTranscriptFiles();
-  const digests = [];
+  const sessions = [];
 
   for (const file of files) {
-    if (digests.length === wanted.size) break;
+    if (sessions.length === wanted.size) break;
     const session = safeParseTranscriptFile(file);
     if (!session || !wanted.has(session.sessionId)) continue;
-    digests.push(buildSessionDigest(session));
+    sessions.push(session);
   }
 
-  process.stdout.write(JSON.stringify({ sessions: digests }, null, 2) + '\n');
+  const bundle = buildDigestBundle(sessions, { sessionsRequested: sessionIds.length });
+  process.stdout.write(JSON.stringify(bundle, null, 2) + '\n');
+}
+
+// Halves the turns kept per session until the digests fit the budget, so a
+// cluster of long sessions still grades on a sample of every session rather
+// than on a few sessions in full.
+function buildDigestBundle(sessions, { sessionsRequested = sessions.length, maxChars = DIGEST_MAX_CHARS } = {}) {
+  let maxTurns = DIGEST_MAX_TURNS;
+  let digests = sessions.map((s) => buildSessionDigest(s, maxTurns));
+  while (JSON.stringify(digests).length > maxChars && maxTurns > DIGEST_MIN_TURNS) {
+    maxTurns = Math.max(DIGEST_MIN_TURNS, Math.floor(maxTurns / 2));
+    digests = sessions.map((s) => buildSessionDigest(s, maxTurns));
+  }
+  return { sessionsRequested, sessionsIncluded: digests.length, maxTurnsPerSession: maxTurns, sessions: digests };
 }
 
 function safeParseTranscriptFile(filePath) {
@@ -231,9 +254,9 @@ function safeParseTranscriptFile(filePath) {
   }
 }
 
-function buildSessionDigest(session) {
+function buildSessionDigest(session, maxTurns = DIGEST_MAX_TURNS) {
   const relevantTurns = session.turns.filter((t) => isHumanTypedTurn(t) || t.type === 'assistant');
-  const sampledTurns = sampleHeadAndTail(relevantTurns, DIGEST_MAX_TURNS);
+  const sampledTurns = sampleHeadAndTail(relevantTurns, maxTurns);
 
   // Interleaved, in order, with per-turn model attribution — a flattened
   // "humanTurns" + "toolUses" split (the original design) loses turn order
@@ -318,7 +341,7 @@ function isLoupeScriptInvocation(toolUse) {
 }
 
 function isLoupeGradingPrompt(turn) {
-  return isHumanTypedTurn(turn) && turn.text.includes(LOUPE_GRADING_PROMPT_SIGNATURE);
+  return isHumanTypedTurn(turn) && LOUPE_PROMPT_SIGNATURES.some((signature) => turn.text.includes(signature));
 }
 
 function persistNewlyDetectedSelfSessions(sessionIds) {
@@ -541,21 +564,30 @@ function detectRecurringTurnPatternCandidates(groupedSessions, turnMatches) {
   for (const [groupName, sessions] of groupedSessions) {
     const matchedTurns = [];
     for (const session of sessions) {
+      // The same text typed or re-injected again in one session counts once,
+      // so one long session can't pass for a recurring pattern.
+      const textsSeenInSession = new Set();
       for (let i = 0; i < session.turns.length; i++) {
         const turn = session.turns[i];
         if (!isPersonTypedTurn(turn)) continue;
         if (!turnMatches(turn, session, i)) continue;
-        matchedTurns.push({ sessionId: session.sessionId, text: turn.text.trim() });
+        const text = turn.text.trim();
+        const dedupeKey = text.toLowerCase().replace(/\s+/g, ' ');
+        if (textsSeenInSession.has(dedupeKey)) continue;
+        textsSeenInSession.add(dedupeKey);
+        matchedTurns.push({ sessionId: session.sessionId, text });
       }
     }
 
     const textClusters = clusterBySimilarity(matchedTurns, (item) => normalizeForSimilarity(item.text));
     for (const cluster of textClusters) {
+      const evidenceSessionIds = [...new Set(cluster.map((c) => c.sessionId))];
+      if (evidenceSessionIds.length < MIN_CLUSTER_SIZE) continue;
       clusters.push({
         group: groupName,
         representativeText: cluster[0].text,
         occurrenceCount: cluster.length,
-        evidenceSessionIds: [...new Set(cluster.map((c) => c.sessionId))],
+        evidenceSessionIds,
       });
     }
   }
@@ -583,7 +615,7 @@ function detectSkillCandidates(groupedSessions) {
         occurrenceCount: cluster.length,
         sharedToolPattern: cluster[0].signature.slice(0, 12),
         hasExistingSkillDir: repoPath ? fs.existsSync(path.join(repoPath, '.claude', 'skills')) : false,
-        evidenceSessionIds: cluster.map((c) => c.sessionId),
+        ...cappedEvidence(mostRecentSessionIds(cluster.map((c) => c.session))),
       });
     }
   }
@@ -989,18 +1021,34 @@ function detectSessionHygieneCandidates(groupedSessions) {
     const hasClaudeMd = hasRepoClaudeMd || hasGlobalClaudeMd;
 
     if (!hasClaudeMd && sessions.length >= MIN_CLUSTER_SIZE) {
-      clusters.push({ group: groupName, signal: 'no-claude-md', evidenceSessionIds: sessions.map((s) => s.sessionId) });
+      clusters.push({ group: groupName, signal: 'no-claude-md', ...cappedEvidence(mostRecentSessionIds(sessions)) });
     }
 
-    for (const session of sessions) {
-      const slope = correctionRateSlope(session);
-      if (slope !== null && slope >= HYGIENE_SLOPE_THRESHOLD) {
-        clusters.push({ group: groupName, signal: 'rising-correction-rate', slope, evidenceSessionIds: [session.sessionId] });
-      }
-    }
+    const risingCluster = buildRisingCorrectionCluster(groupName, sessions);
+    if (risingCluster) clusters.push(risingCluster);
   }
 
   return clusters;
+}
+
+// One cluster per group, and only when two or more sessions show the rise:
+// a single long session is an anecdote, not a habit worth a threshold.
+// Steepest sessions come first so the digest sample shows the clearest cases.
+function buildRisingCorrectionCluster(groupName, sessions) {
+  const rising = sessions
+    .map((session) => ({ session, slope: correctionRateSlope(session) }))
+    .filter((entry) => entry.slope !== null && entry.slope >= HYGIENE_SLOPE_THRESHOLD)
+    .sort((a, b) => b.slope - a.slope);
+  if (rising.length < MIN_CLUSTER_SIZE) return null;
+
+  const slopes = rising.map((entry) => entry.slope);
+  return {
+    group: groupName,
+    signal: 'rising-correction-rate',
+    maxSlope: slopes[0],
+    medianSlope: slopes[Math.floor(slopes.length / 2)],
+    ...cappedEvidence(rising.map((entry) => entry.session.sessionId)),
+  };
 }
 
 function correctionRateSlope(session) {
@@ -1153,5 +1201,9 @@ module.exports = {
   countIndependentSerialChunks,
   isPersonTypedTurn,
   detectGuidelineCandidates,
+  detectSkillCandidates,
+  detectSessionHygieneCandidates,
   correctionRateSlope,
+  buildDigestBundle,
+  buildSessionDigest,
 };
