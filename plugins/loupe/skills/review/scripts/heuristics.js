@@ -30,6 +30,7 @@ const {
 } = require('./claude-config');
 const { buildGradingQueue } = require('./grading-queue');
 const grouping = require('./grouping');
+const { PROCEDURE_GRAM_LENGTH, buildProcedureSteps, findRecurringStepRuns } = require('./procedure-steps');
 
 const HOME_DIR = os.homedir();
 const PROJECTS_DIR = path.join(HOME_DIR, '.claude', 'projects');
@@ -614,23 +615,33 @@ function detectRecurringTurnPatternCandidates(groupedSessions, turnMatches) {
 // Category B — Skills (.claude/skills/)
 // ---------------------------------------------------------------------------
 
+// A procedure needs this many sessions to count as re-derived rather than
+// a one-off; two sessions sharing three steps is often coincidence.
+const MIN_PROCEDURE_SESSIONS = 3;
+// A recurring run joins a larger one when at least this share of its
+// sessions are already in it: both are parts of one procedure.
+const PROCEDURE_MERGE_OVERLAP = 0.5;
+const MAX_PROCEDURE_STEPS = 8;
+
 function detectSkillCandidates(groupedSessions) {
+  const allSessions = [...groupedSessions.values()].flat();
+  const stepsBySession = buildProcedureSteps(allSessions);
+  const sessionsById = new Map(allSessions.map((session) => [session.sessionId, session]));
   const clusters = [];
 
   for (const [groupName, sessions] of groupedSessions) {
-    const sessionSignatures = sessions
-      .map((session) => ({ sessionId: session.sessionId, session, signature: buildToolSequenceSignature(session) }))
-      .filter((entry) => entry.signature.length >= MIN_CLUSTER_SIZE);
+    const runs = findRecurringStepRuns(stepsBySession, sessions.map((session) => session.sessionId))
+      .filter((run) => run.sessionIds.size >= MIN_PROCEDURE_SESSIONS);
 
-    const signatureClusters = clusterBySimilarity(sessionSignatures, (entry) => entry.signature);
-    for (const cluster of signatureClusters) {
-      const repoPath = cluster[0].session.cwd;
+    for (const procedure of mergeOverlappingRuns(runs)) {
+      const procedureSessions = [...procedure.sessionIds].map((id) => sessionsById.get(id));
+      const repoPath = procedureSessions[0].cwd;
       clusters.push({
         group: groupName,
-        occurrenceCount: cluster.length,
-        sharedToolPattern: cluster[0].signature.slice(0, 12),
+        occurrenceCount: procedureSessions.length,
+        procedureSteps: procedure.steps,
         hasExistingSkillDir: repoPath ? fs.existsSync(path.join(repoPath, '.claude', 'skills')) : false,
-        ...cappedEvidence(mostRecentSessionIds(cluster.map((c) => c.session))),
+        ...cappedEvidence(mostRecentSessionIds(procedureSessions)),
       });
     }
   }
@@ -638,14 +649,41 @@ function detectSkillCandidates(groupedSessions) {
   return clusters;
 }
 
-function buildToolSequenceSignature(session) {
-  const signature = [];
-  for (const turn of session.turns) {
-    for (const toolUse of turn.toolUses) {
-      signature.push(toolUse.name);
+// Overlapping runs (A>B>C and B>C>D in the same sessions) are one
+// procedure. Widest runs seed procedures; each later run joins the first
+// procedure that already holds most of its sessions.
+function mergeOverlappingRuns(runs) {
+  const procedures = [];
+  const widestFirst = [...runs].sort((a, b) => b.sessionIds.size - a.sessionIds.size);
+  for (const run of widestFirst) {
+    const home = procedures.find((procedure) => sharedSessionShare(run, procedure) >= PROCEDURE_MERGE_OVERLAP);
+    if (!home) {
+      procedures.push({ steps: [...run.steps], sessionIds: new Set(run.sessionIds) });
+      continue;
     }
+    for (const id of run.sessionIds) home.sessionIds.add(id);
+    home.steps = extendSteps(home.steps, run.steps);
   }
-  return signature;
+  return procedures;
+}
+
+function sharedSessionShare(run, procedure) {
+  let shared = 0;
+  for (const id of run.sessionIds) if (procedure.sessionIds.has(id)) shared++;
+  return shared / run.sessionIds.size;
+}
+
+// Grows the procedure by one step when the run continues it at either end.
+function extendSteps(steps, run) {
+  if (steps.length >= MAX_PROCEDURE_STEPS) return steps;
+  const overlap = PROCEDURE_GRAM_LENGTH - 1;
+  if (sameSteps(steps.slice(-overlap), run.slice(0, overlap))) return [...steps, run[overlap]];
+  if (sameSteps(steps.slice(0, overlap), run.slice(1))) return [run[0], ...steps];
+  return steps;
+}
+
+function sameSteps(a, b) {
+  return a.length === b.length && a.every((step, i) => step === b[i]);
 }
 
 // ---------------------------------------------------------------------------
