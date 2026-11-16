@@ -9,7 +9,7 @@ const {
   isManualWorkTurn,
   collectUsedMcpServers,
   countIndependentSerialChunks,
-} = require('../heuristics');
+} = require('../plugins/loupe/skills/review/scripts/heuristics');
 
 function human(text) {
   return { type: 'user', isMeta: false, isToolResultTurn: false, text, toolUses: [] };

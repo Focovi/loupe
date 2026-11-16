@@ -7,7 +7,7 @@
  * Discovers local Claude Code session transcripts, groups them into logical
  * projects, and runs cheap structural/regex detectors for each of the seven
  * recommendation categories (A-G). Outputs candidate clusters as JSON to
- * stdout — no LLM grading happens here (that's grade.sh, Phase 2).
+ * stdout — no LLM grading happens here (that's grade.js, Phase 2).
  *
  * Usage:
  *   node heuristics.js                 run the full pass, print JSON
@@ -29,15 +29,18 @@ const {
   readFollowUpHookCommands,
 } = require('./claude-config');
 const { buildGradingQueue } = require('./grading-queue');
+const grouping = require('./grouping');
 
 const HOME_DIR = os.homedir();
 const PROJECTS_DIR = path.join(HOME_DIR, '.claude', 'projects');
 const LOUPE_DIR = path.join(HOME_DIR, '.loupe');
 const GROUPS_FILE = path.join(LOUPE_DIR, 'groups.json');
+const CONFIG_FILE = path.join(LOUPE_DIR, 'config.json');
 const EXCLUDED_SESSIONS_FILE = path.join(LOUPE_DIR, 'excluded-sessions.json');
 const RUNS_DIR = path.join(LOUPE_DIR, 'runs');
-const DEVELOPER_DIR_NAME = 'Developer';
-const LOUPE_SCRIPTS_PATH_FRAGMENT = path.join('skills', 'review', 'scripts');
+// Either separator: a Windows session may call the scripts with
+// backslashes (cmd, PowerShell) or forward slashes (Git Bash).
+const LOUPE_SCRIPTS_PATH_PATTERN = /skills[\\/]+review[\\/]+scripts/;
 // Must match the opening line build-grade-prompt.js sends verbatim.
 const LOUPE_GRADING_PROMPT_SIGNATURE = 'grading a candidate recommendation for Loupe';
 
@@ -292,9 +295,9 @@ function loadExcludedSessionIds() {
 }
 
 // Two distinct kinds of session are self-referential and neither is
-// optional: the orchestrating session (calls heuristics.js/grade.sh via
+// optional: the orchestrating session (calls heuristics.js/grade.js via
 // Bash, caught below by tool-call inspection) and each grading *child*
-// session grade.sh spawns via `claude -p` (does its own independent
+// session grade.js spawns via `claude -p` (does its own independent
 // reasoning/tool calls and never references Loupe's scripts at all, so
 // tool-call inspection can't see it — caught by matching the fixed prompt
 // signature build-grade-prompt.js always sends). --mark-self tags child
@@ -310,7 +313,7 @@ function isLoupeScriptInvocation(toolUse) {
   if (toolUse.name !== 'Bash' || !toolUse.input || typeof toolUse.input.command !== 'string') {
     return false;
   }
-  return toolUse.input.command.includes(LOUPE_SCRIPTS_PATH_FRAGMENT);
+  return LOUPE_SCRIPTS_PATH_PATTERN.test(toolUse.input.command);
 }
 
 function isLoupeGradingPrompt(turn) {
@@ -423,26 +426,11 @@ function loadOrSuggestGroups(sessions) {
 }
 
 function suggestGroups(sessions) {
-  const groups = {};
-  for (const session of sessions) {
-    const suggestion = suggestProjectForPath(session.cwd);
-    if (!suggestion) continue;
-    if (!groups[suggestion.projectName]) groups[suggestion.projectName] = [];
-    if (!groups[suggestion.projectName].includes(suggestion.repoPath)) {
-      groups[suggestion.projectName].push(suggestion.repoPath);
-    }
-  }
-  return groups;
-}
-
-function suggestProjectForPath(cwd) {
-  if (!cwd) return null;
-  const parts = cwd.split(path.sep).filter(Boolean);
-  const devIndex = parts.findIndex((part) => part === DEVELOPER_DIR_NAME);
-  if (devIndex === -1 || devIndex + 1 >= parts.length) return null;
-  const projectName = parts[devIndex + 1];
-  const repoPath = path.sep + path.join(...parts.slice(0, devIndex + 2));
-  return { projectName, repoPath };
+  const config = readJsonSafe(CONFIG_FILE, {});
+  return grouping.suggestGroups(sessions.map((session) => session.cwd), {
+    homeDir: HOME_DIR,
+    roots: Array.isArray(config.projectRoots) ? config.projectRoots : null,
+  });
 }
 
 function assignSessionsToGroups(sessions, groups) {
@@ -458,7 +446,7 @@ function assignSessionsToGroups(sessions, groups) {
 function findGroupForSession(session, groups) {
   if (!session.cwd) return null;
   for (const [groupName, repoPaths] of Object.entries(groups)) {
-    if (repoPaths.some((repoPath) => session.cwd === repoPath || session.cwd.startsWith(repoPath + path.sep))) {
+    if (repoPaths.some((repoPath) => grouping.isSameOrInside(session.cwd, grouping.expandHome(repoPath, HOME_DIR)))) {
       return groupName;
     }
   }
@@ -480,8 +468,8 @@ function filterByScope(sessions, groups, { repo, branch }) {
 function sessionMatchesRepo(session, groups, repoArg) {
   if (findGroupForSession(session, groups) === repoArg) return true;
   if (!session.cwd) return false;
-  const resolvedPath = path.resolve(repoArg.replace(/^~/, HOME_DIR));
-  return session.cwd === resolvedPath || session.cwd.startsWith(resolvedPath + path.sep);
+  const resolvedPath = path.resolve(grouping.expandHome(repoArg, HOME_DIR));
+  return grouping.isSameOrInside(session.cwd, resolvedPath);
 }
 
 // ---------------------------------------------------------------------------

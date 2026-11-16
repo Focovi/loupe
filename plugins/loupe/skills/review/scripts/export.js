@@ -93,6 +93,7 @@ function buildExport(run, developer, redactTerms) {
     exportedAt: new Date().toISOString(),
     runGeneratedAt: run.generatedAt,
     profile: run.profile,
+    gradingModels: run.gradingModels || [],
     sessionsAnalyzed,
     categories,
     findings,

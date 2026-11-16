@@ -12,7 +12,7 @@ const {
   readProjectMcpServers,
   readPluginMcpServers,
   readFollowUpHookCommands,
-} = require('../claude-config');
+} = require('../plugins/loupe/skills/review/scripts/claude-config');
 
 function writeJson(filePath, data) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });

@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildGradingQueue, clusterReach } = require('../grading-queue');
+const { buildGradingQueue, clusterReach } = require('../plugins/loupe/skills/review/scripts/grading-queue');
 
 function clusters(count, reach) {
   return Array.from({ length: count }, (_, i) => ({ id: i, evidenceSessionIds: Array.from({ length: reach }, (_, j) => `s${j}`) }));

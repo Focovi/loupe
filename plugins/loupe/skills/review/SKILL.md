@@ -106,8 +106,13 @@ important one — **a one-line update after every single grading call in Step
    ("Grading 14 candidates, this takes a few minutes..."). Then for each
    `{categoryLetter, cluster}` pair, in order:
    ```
-   echo '<cluster JSON>' | "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/grade.sh" <categoryLetter>
+   echo '<cluster JSON>' | node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/grade.js" <categoryLetter>
    ```
+   If the cluster JSON contains a single quote, write it to a temp file
+   and run `node .../grade.js <categoryLetter> < <file>` instead. Always
+   call it through `node`: `grade.js` works the same on macOS, Linux and
+   Windows, and pins the grading model so every developer's grades are
+   comparable. Never pass a different model unless the user asks.
    and **immediately after that call returns, before starting the next
    one**, post a single short line: `[i/total] <category label>:
    accepted` / `rejected (<short reason>)` / `error`. That line is a plain
@@ -119,7 +124,7 @@ important one — **a one-line update after every single grading call in Step
      the heuristic was wrong. Drop it, but keep the reason around for the
      progress line above and in case the terminal summary wants to mention
      how many were screened out this way.
-   - `grade.sh` exits non-zero (a `claude -p` failure or a malformed model
+   - `grade.js` exits non-zero (a `claude -p` failure or a malformed model
      response) — log it, say so in the progress line, and continue with the
      rest of the queue. One bad grading call should never abort the whole
      run.
@@ -146,7 +151,8 @@ important one — **a one-line update after every single grading call in Step
    The last line of stdout is the HTML report's file path.
 
 7. **Open the report and present the run.** Open the HTML report path from
-   step 6 automatically (`open <path>` on macOS) so it's already on screen,
+   step 6 automatically (`open <path>` on macOS, `xdg-open <path>` on
+   Linux, `start "" "<path>"` on Windows) so it's already on screen,
    then show the user the terminal summary. Note explicitly which
    categories came back empty and whether that's because nothing was found
    or because everything got rejected at grading — those mean different
