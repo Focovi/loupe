@@ -137,10 +137,11 @@ const HOOK_ACTIONS = [
 const MANUAL_WORK_PATTERN = /\b(copy(-| )?past(e|ed|ing)|i (copied|pasted|grabbed|exported|downloaded)|paste (this|it|the [a-z]+) (in|into|here)|from the (browser|console|dashboard|portal|web ui|website)|manually (check(ed|ing)?|cop(y|ied)|updat(e|ed|ing)|paginat(e|ing)|deploy(ed|ing)?|run|ran|enter(ed)?|typ(e|ed)|scan(ned)?|add(ed)?|trigger(ed)?|creat(e|ed))|by hand|switch(ing)? tabs?|in the (aws |azure |gcp )?console|check (the )?([\w.-]+ ){0,3}(logs|alarms?|dashboards?|metrics|traces) (in|on|from)|i (checked|looked) (in|on|at) (the )?[\w.-]+ (ui|dashboard|console|portal))\b/i;
 const PASTED_EXTERNAL_OUTPUT_PATTERN = /<pasted_content\b[^>]*>[\s\S]*?\b(error|exception|traceback|stack ?trace|failed|fatal)\b/i;
 // User-role turns the person didn't type: compaction summaries, system
-// reminders, scheduled-task prompts and other injected context. Their
-// boilerplate ("never edit generated files by hand") matched hundreds of
-// times and drowned out what people actually asked for.
-const INJECTED_TURN_PATTERN = /^\s*(<(system-reminder|scheduled-task|command-[a-z]+|local-command-[a-z]+|task-notification|cross-session-message|artifact-content[a-z-]*|side-sessions-event|ci-monitor-event|bash-[a-z]+)\b|This session is being continued from a previous conversation|Caveat: )/i;
+// reminders, scheduled-task prompts, interrupt markers, task briefs sent by
+// another session and other injected context. Their boilerplate ("never
+// edit generated files by hand") matched hundreds of times and drowned out
+// what people actually asked for.
+const INJECTED_TURN_PATTERN = /^\s*(<(system-reminder|scheduled-task|command-[a-z]+|local-command-[a-z]+|task-notification|cross-session-message|artifact-[a-z-]+|side-sessions-event|ci-monitor-event|bash-[a-z]+)\b|This session is being continued from a previous conversation|Caveat: |\[Request interrupted by user|Background \(from the session that started this one\))/i;
 const PASTED_CONTENT_BLOCK_PATTERN = /<pasted_content\b[^>]*>[\s\S]*?<\/pasted_content[^>]*>/gi;
 // Bash commands that write files, for sessions that edit without the Edit
 // tool (heredocs, sed -i, scripted rewrites).
@@ -403,8 +404,9 @@ function isHumanTypedTurn(turn) {
 }
 
 // Stricter than isHumanTypedTurn: also drops injected context that arrives
-// as a user turn. Used by the C and D detectors, whose phrase matching is
-// most sensitive to that boilerplate.
+// as a user turn. Used by every detector that reads what the person asked
+// for (A, C, D and G); the session digest keeps the looser check so the
+// grader still sees the context the model was given.
 function isPersonTypedTurn(turn) {
   return isHumanTypedTurn(turn) && !INJECTED_TURN_PATTERN.test(turn.text);
 }
@@ -530,9 +532,9 @@ function detectGuidelineCandidates(groupedSessions) {
   });
 }
 
-// Shared by categories A and C: both look for short human turns matching a
-// regex, then cluster the matches by text similarity to find a *recurring*
-// pattern rather than a one-off.
+// Looks for short person-typed turns matching a predicate, then clusters
+// the matches by text similarity to find a *recurring* pattern rather than
+// a one-off.
 function detectRecurringTurnPatternCandidates(groupedSessions, turnMatches) {
   const clusters = [];
 
@@ -541,7 +543,7 @@ function detectRecurringTurnPatternCandidates(groupedSessions, turnMatches) {
     for (const session of sessions) {
       for (let i = 0; i < session.turns.length; i++) {
         const turn = session.turns[i];
-        if (!isHumanTypedTurn(turn)) continue;
+        if (!isPersonTypedTurn(turn)) continue;
         if (!turnMatches(turn, session, i)) continue;
         matchedTurns.push({ sessionId: session.sessionId, text: turn.text.trim() });
       }
@@ -1002,7 +1004,7 @@ function detectSessionHygieneCandidates(groupedSessions) {
 }
 
 function correctionRateSlope(session) {
-  const humanTurns = session.turns.filter(isHumanTypedTurn);
+  const humanTurns = session.turns.filter(isPersonTypedTurn);
   if (humanTurns.length < HYGIENE_WINDOW_TURNS * 2) return null;
 
   const firstWindow = humanTurns.slice(0, HYGIENE_WINDOW_TURNS);
@@ -1149,4 +1151,7 @@ module.exports = {
   isManualWorkTurn,
   collectUsedMcpServers,
   countIndependentSerialChunks,
+  isPersonTypedTurn,
+  detectGuidelineCandidates,
+  correctionRateSlope,
 };
