@@ -59,10 +59,40 @@ function collectRedactTerms(config, extraTerms, readText = readTextOrNull) {
       unreadableFiles.push(file);
       continue;
     }
-    terms.push(...text.split('\n').filter((line) => line.trim() && !COMMENT_LINE_PATTERN.test(line)));
+    terms.push(...listTerms(text));
   }
   const cleaned = terms.map((term) => term.trim()).filter(Boolean);
   return { terms: [...new Set(cleaned)], unreadableFiles };
+}
+
+function listTerms(text) {
+  return text.split('\n').filter((line) => line.trim() && !COMMENT_LINE_PATTERN.test(line)).map((line) => line.trim());
+}
+
+/**
+ * Appends the terms the shared list doesn't have yet (ignoring case), so
+ * a teammate's next export redacts them without anyone deciding again.
+ * Returns the terms added. Throws when the list can't be read or written,
+ * so the caller can say the terms were not shared.
+ */
+function addToSharedList(filePath, terms, { readText = readTextOrNull, appendText = appendTextToFile } = {}) {
+  const existing = readText(filePath);
+  if (existing === null) throw new Error(`could not read ${filePath}`);
+  const listed = new Set(listTerms(existing).map((term) => term.toLowerCase()));
+  const added = [];
+  for (const term of terms.map((t) => t.trim()).filter(Boolean)) {
+    if (listed.has(term.toLowerCase())) continue;
+    listed.add(term.toLowerCase());
+    added.push(term);
+  }
+  if (added.length === 0) return added;
+  const separator = existing === '' || existing.endsWith('\n') ? '' : '\n';
+  appendText(filePath, separator + added.join('\n') + '\n');
+  return added;
+}
+
+function appendTextToFile(filePath, text) {
+  fs.appendFileSync(filePath, text);
 }
 
 function readTextOrNull(filePath) {
@@ -119,4 +149,5 @@ module.exports = {
   collectRedactTerms,
   findPossibleNames,
   rememberChoices,
+  addToSharedList,
 };

@@ -34,10 +34,16 @@ const OUTPUT_CONTRACT = `Respond with ONLY a single JSON object (no markdown fen
 If, after reviewing the evidence, you conclude the heuristic pre-filter was wrong and this isn't actually a real recommendation, respond instead with:
 {"category": "<letter>", "evidence_session_ids": [], "is_gap": null, "title": null, "recommendation": null, "proposed_artifact": null, "apply_prompt": null, "rejected_reason": "<why the evidence doesn't support this>"}
 
+Names: title, recommendation and proposed_artifact may be shared with the developer's lead, so never name a person, client, customer or their company in them. Say "the developer", "a teammate", "the client" or "a customer project" instead. Tools, languages and services (Claude Code, GitHub, Jira) are fine. apply_prompt stays on the developer's machine, so it may name repos and paths.
+
 Style: do not use em dashes (—) anywhere in any field. Use a comma, period, colon, or parentheses instead.`;
 
 function main() {
   const [category, clusterPath, digestPath] = process.argv.slice(2);
+  process.stdout.write(buildPrompt(category, clusterPath, digestPath));
+}
+
+function buildPrompt(category, clusterPath, digestPath) {
   const rubric = RUBRICS[category];
   if (!rubric) {
     process.stderr.write(`unknown category "${category}" — expected one of A-G\n`);
@@ -47,7 +53,7 @@ function main() {
   const cluster = fs.readFileSync(clusterPath, 'utf8');
   const digest = fs.readFileSync(digestPath, 'utf8');
 
-  const prompt = [
+  return [
     'You are grading a candidate recommendation for Loupe, a tool that reviews a developer\'s own Claude Code session history and proposes concrete workflow improvements grounded in evidence — never generic best-practice advice.',
     '',
     rubric,
@@ -62,8 +68,8 @@ function main() {
     '',
     OUTPUT_CONTRACT,
   ].join('\n');
-
-  process.stdout.write(prompt);
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { OUTPUT_CONTRACT };

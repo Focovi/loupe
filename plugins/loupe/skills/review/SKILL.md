@@ -196,9 +196,13 @@ what goes.
    - which of the "Possible names still in the findings" are client,
      product or coworker names to redact. That line lists capitalized
      words the scrubber can't judge, so it includes false alarms;
-   - whether to remember the name and those terms for next time.
+   - whether to remember the name and those terms for next time;
+   - when the preview shows a "Team redact list" line, whether to add the
+     terms to that list too, so teammates' exports redact them without
+     asking.
 3. If anything changes, re-run with `--as "<name>"`, `--redact "Term A,Term B"`
-   and, when they said to remember, `--remember`. Show the new preview and
+   and, when they said so, `--remember` and `--share-redactions`. Show the
+   new preview and
    ask them to read every finding before sending the file. The file goes
    wherever the user sends it; you never send it yourself.
 

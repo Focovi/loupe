@@ -8,6 +8,7 @@ const {
   collectRedactTerms,
   findPossibleNames,
   rememberChoices,
+  addToSharedList,
 } = require('../plugins/loupe/skills/review/scripts/export-setup');
 
 const noGitName = () => '';
@@ -71,4 +72,39 @@ test('rememberChoices saves the name and adds terms without losing other setting
   const saved = rememberChoices(config, { name: 'Sam', redactTerms: ['Acme', 'Globex'] });
 
   assert.deepEqual(saved, { projectRoots: ['~/code'], exportRedact: ['Acme', 'Globex'], exportName: 'Sam' });
+});
+
+function fakeList(text) {
+  const appended = [];
+  return { appended, io: { readText: () => text, appendText: (file, added) => appended.push(added) } };
+}
+
+test('addToSharedList appends only the terms the list does not have, ignoring case', () => {
+  const { appended, io } = fakeList('# team list\nAcme\n');
+
+  const added = addToSharedList('team.txt', ['acme', 'Globex', 'Globex', ' Initech '], io);
+
+  assert.deepEqual(added, ['Globex', 'Initech']);
+  assert.deepEqual(appended, ['Globex\nInitech\n']);
+});
+
+test('addToSharedList starts a new line when the list does not end with one', () => {
+  const { appended, io } = fakeList('Acme');
+
+  addToSharedList('team.txt', ['Globex'], io);
+
+  assert.deepEqual(appended, ['\nGlobex\n']);
+});
+
+test('addToSharedList writes nothing when every term is already listed', () => {
+  const { appended, io } = fakeList('Acme\n');
+
+  const added = addToSharedList('team.txt', ['Acme'], io);
+
+  assert.deepEqual(added, []);
+  assert.deepEqual(appended, []);
+});
+
+test('addToSharedList throws when the list cannot be read', () => {
+  assert.throws(() => addToSharedList('missing.txt', ['Acme'], { readText: () => null }), /could not read missing\.txt/);
 });

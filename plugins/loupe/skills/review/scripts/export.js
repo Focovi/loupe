@@ -12,7 +12,7 @@
  * excerpts and apply prompts (the developer still has those locally).
  *
  * Usage:
- *   node export.js [--run <run json path>] [--as <name>] [--redact "term1,term2"] [--remember] [--out <path>]
+ *   node export.js [--run <run json path>] [--as <name>] [--redact "term1,term2"] [--remember] [--share-redactions] [--out <path>]
  *
  * --run       defaults to the most recent run in ~/.loupe/runs/
  * --as        the name the lead sees; defaults to exportName in
@@ -21,6 +21,9 @@
  *             exportRedact and the files in exportRedactFiles (a shared
  *             team list, one term per line) in ~/.loupe/config.json
  * --remember  saves the name and the --redact terms to ~/.loupe/config.json
+ * --share-redactions
+ *             adds the --redact terms to the team list (the first file in
+ *             exportRedactFiles), so teammates' exports redact them too
  * --out       defaults to ~/.loupe/exports/<run timestamp>.json
  *
  * Prints a preview of exactly what was written, including capitalized
@@ -32,7 +35,13 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { createScrubber } = require('./scrub');
-const { resolveDeveloperName, collectRedactTerms, findPossibleNames, rememberChoices } = require('./export-setup');
+const {
+  resolveDeveloperName,
+  collectRedactTerms,
+  findPossibleNames,
+  rememberChoices,
+  addToSharedList,
+} = require('./export-setup');
 
 const LOUPE_DIR = path.join(os.homedir(), '.loupe');
 const RUNS_DIR = path.join(LOUPE_DIR, 'runs');
@@ -61,10 +70,8 @@ function main() {
   const run = readJson(runPath);
 
   const extraTerms = splitList(args.redact);
-  const { terms: redactTerms, unreadableFiles } = collectRedactTerms(
-    { ...config, exportRedactFiles: (config.exportRedactFiles || []).map(expandHome) },
-    extraTerms,
-  );
+  const redactFiles = (config.exportRedactFiles || []).map(expandHome);
+  const { terms: redactTerms, unreadableFiles } = collectRedactTerms({ ...config, exportRedactFiles: redactFiles }, extraTerms);
   const developer = resolveDeveloperName(args.as, config);
   const exported = buildExport(run, developer, redactTerms);
 
@@ -77,8 +84,24 @@ function main() {
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, JSON.stringify(exported, null, 2) + '\n');
 
-  const notes = { possibleNames: findPossibleNames(exported), unreadableFiles, remembered: Boolean(args.remember) };
+  const notes = {
+    possibleNames: findPossibleNames(exported),
+    unreadableFiles,
+    remembered: Boolean(args.remember),
+    teamList: redactFiles[0] || null,
+    shared: args['share-redactions'] ? shareRedactions(redactFiles[0], extraTerms) : null,
+  };
   process.stdout.write(renderPreview(exported, notes) + '\n' + outPath + '\n');
+}
+
+/** Adds the --redact terms to the team list, reporting instead of failing. */
+function shareRedactions(teamList, terms) {
+  if (!teamList) return { error: 'no team redact list is set (exportRedactFiles in ~/.loupe/config.json)' };
+  try {
+    return { file: teamList, added: addToSharedList(teamList, terms) };
+  } catch (err) {
+    return { file: teamList, error: err.message };
+  }
 }
 
 function buildExport(run, developer, redactTerms) {
@@ -165,8 +188,17 @@ function renderPreview(exported, notes = {}) {
     lines.push('', `Possible names still in the findings: ${notes.possibleNames.join(', ')}`);
   }
   for (const file of notes.unreadableFiles || []) lines.push(`Could not read redact list ${file}; its terms were not applied.`);
+  if (notes.teamList) lines.push(`Team redact list: ${notes.teamList}`);
+  lines.push(...describeSharing(notes.shared));
   if (notes.remembered) lines.push(`Saved the name "${exported.developer}" and the --redact terms to ~/.loupe/config.json.`);
   return lines.join('\n');
+}
+
+function describeSharing(shared) {
+  if (!shared) return [];
+  if (shared.error) return [`Did not add the --redact terms to the team list: ${shared.error}.`];
+  if (shared.added.length === 0) return [`The team list ${shared.file} already had every --redact term.`];
+  return [`Added to the team list ${shared.file}: ${shared.added.join(', ')}. Share the updated file with your team.`];
 }
 
 function indent(text) {
@@ -186,7 +218,7 @@ function splitList(value) {
   return value ? value.split(',').map((term) => term.trim()).filter(Boolean) : [];
 }
 
-const BOOLEAN_FLAGS = new Set(['remember']);
+const BOOLEAN_FLAGS = new Set(['remember', 'share-redactions']);
 
 function parseArgs(argv) {
   const args = {};
