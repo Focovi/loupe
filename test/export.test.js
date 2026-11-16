@@ -42,6 +42,7 @@ function sampleRun(overrides = {}) {
         category: 'B',
         evidence_session_ids: [SESSION_A, SESSION_B],
         is_gap: true,
+        title: 'Add an Acme deploy skill',
         recommendation: `Sessions 3f2a9c10 and 7c1d2e3f re-derive the Acme deploy steps in /Users/alex/code/app.`,
         proposed_artifact: { name: 'deploy-acme', steps: ['ask alex@example.com'] },
         apply_prompt: 'Create /Users/alex/code/app/.claude/skills/deploy-acme/SKILL.md',
@@ -92,6 +93,7 @@ test('the export drops session IDs, apply prompts and home paths', () => {
 test('redact terms apply to recommendations and proposed artifacts', () => {
   const exported = buildExport(sampleRun(), 'alex', ['Acme']);
   const [finding] = exported.findings;
+  assert.ok(!/acme/i.test(finding.title));
   assert.ok(!/acme/i.test(finding.recommendation));
   assert.ok(!/acme/i.test(finding.proposedArtifact));
   assert.ok(exported.replacementCount > 0);

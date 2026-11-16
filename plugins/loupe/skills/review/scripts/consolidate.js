@@ -116,6 +116,7 @@ function mergeFindings([primary, ...duplicates]) {
     ...primary,
     evidence_session_ids: [...new Set(evidence)],
     merged_findings: duplicates.map((f) => ({
+      title: f.title,
       recommendation: f.recommendation,
       proposed_artifact: f.proposed_artifact,
       evidence_session_ids: f.evidence_session_ids || [],

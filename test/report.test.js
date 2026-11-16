@@ -81,3 +81,32 @@ test('the summary does not warn when both runs used the same scoring', () => {
   const run = runWithPreviousScoring('fair-share/1');
   assert.doesNotMatch(renderTerminalSummary(run, [], 'report.html'), /two scoring methods/);
 });
+
+function summaryFor(recommendations) {
+  const run = buildRun({ candidates: candidatesWith({ B: 2 }), gradedRecommendations: graded('B', 1, 0), profileName: 'balanced', dialWeights: BALANCED });
+  return renderTerminalSummary(run, recommendations, 'report.html');
+}
+
+test('the summary lists each finding by its title', () => {
+  const rec = { category: 'B', title: 'Add a skill for the dev deploy', recommendation: 'A long paragraph.', evidence_session_ids: ['s'] };
+
+  const summary = summaryFor([rec]);
+
+  assert.match(summary, /\(Skills\) Add a skill for the dev deploy\n/);
+  assert.doesNotMatch(summary, /A long paragraph/);
+});
+
+test('the summary clips a long first sentence when a finding has no title', () => {
+  const rec = { category: 'B', recommendation: `${'word '.repeat(40)}end. Second sentence.`, evidence_session_ids: ['s'] };
+
+  const line = summaryFor([rec]).split('\n').find((l) => l.includes('(Skills)'));
+
+  assert.ok(line.length <= 110, `line is ${line.length} chars`);
+  assert.ok(line.endsWith('…'));
+});
+
+test('the summary shows at most five findings', () => {
+  const recs = Array.from({ length: 8 }, (_, i) => ({ category: 'B', title: `Fix ${i}`, recommendation: 'x', evidence_session_ids: ['s'] }));
+
+  assert.match(summaryFor(recs), /Top recommendations \(5\)/);
+});
