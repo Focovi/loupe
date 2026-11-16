@@ -133,13 +133,26 @@ important one — **a one-line update after every single grading call in Step
    recommendation into a single list. Each has
    `{category, evidence_session_ids, recommendation, proposed_artifact, apply_prompt}`.
 
-6. **Score the run and build the report.** Tell the user you're scoring the
-   run and building the report. Write step 2's heuristics
-   output to a temp file and step 5's collected recommendations (the full
-   graded array, including rejected ones — `report.js` uses rejection
-   counts too) to another temp file, then run:
+6. **Merge duplicate findings.** Tell the user you're merging findings
+   that describe the same habit. Write step 5's full graded array
+   (including rejected ones) to a temp file and run:
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/report.js" --candidates <heuristics-output.json> --graded <graded-recommendations.json>
+   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/consolidate.js" <graded-recommendations.json> > <consolidated.json>
+   ```
+   Clusters are graded one project at a time, so the same habit in three
+   projects comes back as three findings and would cost the category three
+   penalties. This makes one pinned `claude -p` call per category with two
+   or more accepted findings and folds each group into one finding with the
+   combined evidence. If a call fails it leaves that category as graded and
+   says so on stderr; carry on either way.
+
+7. **Score the run and build the report.** Tell the user you're scoring the
+   run and building the report. Write step 2's heuristics output to a temp
+   file and pass step 6's consolidated array (the full graded array,
+   including rejected ones — `report.js` uses rejection counts too) as the
+   graded input, then run:
+   ```
+   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/report.js" --candidates <heuristics-output.json> --graded <consolidated.json>
    ```
    This computes per-category letter grades and a profile-weighted
    composite grade (§5, §3.5), persists the full run to
@@ -150,8 +163,8 @@ important one — **a one-line update after every single grading call in Step
    is exactly what to relay back to the user, verbatim, don't re-derive it.
    The last line of stdout is the HTML report's file path.
 
-7. **Open the report and present the run.** Open the HTML report path from
-   step 6 automatically (`open <path>` on macOS, `xdg-open <path>` on
+8. **Open the report and present the run.** Open the HTML report path from
+   step 7 automatically (`open <path>` on macOS, `xdg-open <path>` on
    Linux, `start "" "<path>"` on Windows) so it's already on screen,
    then show the user the terminal summary. Note explicitly which
    categories came back empty and whether that's because nothing was found

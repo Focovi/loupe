@@ -81,6 +81,7 @@ function buildExport(run, developer, redactTerms) {
         category: letter,
         isGap: finding.is_gap !== false,
         evidenceSessionCount: (finding.evidence_session_ids || []).length,
+        mergedFindingCount: (finding.merged_findings || []).length,
         recommendation: scrub(finding.recommendation),
         proposedArtifact: scrub(finding.proposed_artifact),
       });

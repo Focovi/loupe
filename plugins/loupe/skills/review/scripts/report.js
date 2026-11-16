@@ -605,8 +605,21 @@ function renderRecommendationCard(rec) {
       <button type="button" class="copy-btn" data-copy-text="${escapeHtml(rec.apply_prompt || '')}">Copy</button>
     </div>
   </details>
+  ${renderMergedFindings(rec.merged_findings)}
   <p class="evidence">Evidence: ${evidenceIds || '<span class="muted">none</span>'}</p>
 </article>`;
+}
+
+// Findings consolidate.js folded into this one, usually the same habit
+// seen in other projects. They count once toward the grade.
+function renderMergedFindings(mergedFindings) {
+  if (!Array.isArray(mergedFindings) || mergedFindings.length === 0) return '';
+  const label = mergedFindings.length === 1 ? '1 similar finding' : `${mergedFindings.length} similar findings`;
+  const items = mergedFindings.map((f) => `<li>${escapeHtml(f.recommendation)}</li>`).join('');
+  return `<details class="artifact-details">
+    <summary>Also seen as ${label}, counted once</summary>
+    <ul>${items}</ul>
+  </details>`;
 }
 
 function escapeHtml(text) {
