@@ -147,3 +147,35 @@ test('the CLI remembers the name and redact terms when asked', () => {
   const config = JSON.parse(fs.readFileSync(path.join(home, '.loupe', 'config.json'), 'utf8'));
   assert.deepEqual(config, { projectRoots: ['~/code'], exportName: 'Sam', exportRedact: ['Acme'] });
 });
+
+function runExportWithConfig(config, extraArgs) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loupe-export-'));
+  fs.mkdirSync(path.join(home, '.loupe'));
+  fs.writeFileSync(path.join(home, '.loupe', 'config.json'), JSON.stringify(config(home)));
+  const runPath = path.join(home, 'run.json');
+  fs.writeFileSync(runPath, JSON.stringify(sampleRun()));
+  const stdout = execFileSync(process.execPath, [EXPORT_SCRIPT, '--run', runPath, '--out', path.join(home, 'out.json'), ...extraArgs], {
+    env: { ...process.env, HOME: home, USERPROFILE: home },
+    encoding: 'utf8',
+  });
+  return { home, stdout };
+}
+
+test('the CLI adds the --redact terms to the team list when asked to share them', () => {
+  const { home, stdout } = runExportWithConfig(
+    (dir) => {
+      fs.writeFileSync(path.join(dir, 'team.txt'), 'Globex\n');
+      return { exportRedactFiles: ['~/team.txt'] };
+    },
+    ['--redact', 'Acme,Globex', '--share-redactions'],
+  );
+
+  assert.equal(fs.readFileSync(path.join(home, 'team.txt'), 'utf8'), 'Globex\nAcme\n');
+  assert.match(stdout, /Added to the team list .*team\.txt: Acme\./);
+});
+
+test('the CLI says the terms were not shared when no team list is set', () => {
+  const { stdout } = runExportWithConfig(() => ({}), ['--redact', 'Acme', '--share-redactions']);
+
+  assert.match(stdout, /Did not add the --redact terms to the team list: no team redact list is set/);
+});

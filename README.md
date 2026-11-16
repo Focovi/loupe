@@ -85,6 +85,8 @@ Ask Claude to "export my Loupe review" (or run `/loupe:review --export`).
 counts, gap findings per 10 sessions, and each finding's recommendation and
 proposed artifact. Session IDs, paths, branches, prompt excerpts and apply
 prompts are dropped. Secrets, emails, URLs, IPs and home paths are replaced.
+The grader is told to describe people and clients by role ("a teammate",
+"the client") rather than by name, so most findings carry no names.
 Client and coworker names are only replaced if you list them, so the
 preview also lists capitalized words in the findings that may be names, and
 Claude asks which to redact. List them with `--redact`, `exportRedact` in
@@ -96,7 +98,9 @@ Claude asks which to redact. List them with `--redact`, `exportRedact` in
 ```
 
 The name defaults to git's global `user.name`; `--remember` saves the name
-and `--redact` terms for next time. Read the preview before you send the
+and `--redact` terms for next time, and `--share-redactions` adds the
+`--redact` terms to the first `exportRedactFiles` list so the rest of the
+team never has to decide on them again (share the updated file). Read the preview before you send the
 file.
 
 A lead combines the exports they receive with `aggregate.js <folder>`, which
