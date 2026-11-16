@@ -131,3 +131,19 @@ test('the CLI writes the export, merges config redact terms and ends with the pa
   assert.ok(!/acme/i.test(JSON.stringify(written.findings)));
   assert.match(stdout, /Read the findings above before sharing/);
 });
+
+test('the CLI remembers the name and redact terms when asked', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'loupe-export-'));
+  fs.mkdirSync(path.join(home, '.loupe'));
+  fs.writeFileSync(path.join(home, '.loupe', 'config.json'), JSON.stringify({ projectRoots: ['~/code'] }));
+  const runPath = path.join(home, 'run.json');
+  fs.writeFileSync(runPath, JSON.stringify(sampleRun()));
+
+  execFileSync(process.execPath, [EXPORT_SCRIPT, '--run', runPath, '--as', 'Sam', '--redact', 'Acme', '--remember', '--out', path.join(home, 'out.json')], {
+    env: { ...process.env, HOME: home, USERPROFILE: home },
+    encoding: 'utf8',
+  });
+
+  const config = JSON.parse(fs.readFileSync(path.join(home, '.loupe', 'config.json'), 'utf8'));
+  assert.deepEqual(config, { projectRoots: ['~/code'], exportName: 'Sam', exportRedact: ['Acme'] });
+});

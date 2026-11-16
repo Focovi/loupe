@@ -181,21 +181,26 @@ Run this only when the user asks to export, share or send their review
 your own initiative: the export leaves the user's machine, and they decide
 what goes.
 
-1. Ask which name the lead should see, unless `exportName` is set in
-   `~/.loupe/config.json`, and whether any client or coworker names appear
-   in their findings. Those have no recognizable shape, so the scrubber only
-   removes them when listed.
-2. Run:
+1. Run:
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/export.js" --as "<name>" [--redact "Client A,Coworker B"] [--run <run json path>]
+   node "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/export.js" [--run <run json path>]
    ```
-   With no `--run`, it exports the most recent run. It writes
+   With no `--run`, it exports the most recent run. The name the lead sees
+   comes from `exportName` in `~/.loupe/config.json`, else git's global
+   `user.name`. Redact terms come from `exportRedact` and from any shared
+   team list named in `exportRedactFiles` (one term per line). It writes
    `~/.loupe/exports/<run timestamp>.json` and prints a preview of exactly
    what was written; the last line is the file path.
-3. Show the user the preview verbatim and ask them to read every finding
-   before sending the file. If something should not leave, re-run with more
-   `--redact` terms. The file goes wherever the user sends it; you never
-   send it yourself.
+2. Show the user the preview verbatim. Then ask, in one message:
+   - whether the name is right;
+   - which of the "Possible names still in the findings" are client,
+     product or coworker names to redact. That line lists capitalized
+     words the scrubber can't judge, so it includes false alarms;
+   - whether to remember the name and those terms for next time.
+3. If anything changes, re-run with `--as "<name>"`, `--redact "Term A,Term B"`
+   and, when they said to remember, `--remember`. Show the new preview and
+   ask them to read every finding before sending the file. The file goes
+   wherever the user sends it; you never send it yourself.
 
 Runs are incremental, so one export covers only the sessions since the
 previous run. A developer who reviews often can send several exports; the
