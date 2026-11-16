@@ -43,6 +43,16 @@ exports), the terminal summary warns when it differs from your previous
 run, and the team view warns when exports were graded with different
 models.
 
+## Grades
+
+Each category starts at 100 and loses 15 points per confirmed gap. A run
+grades at most 20 candidate clusters, split evenly between the categories
+that have candidates, and slots a category can't use go to the others.
+A category graded more than its even share is scored at its share, at the
+same rate of real gaps: 5 gaps in 8 graded clusters, with a share of about
+3, cost 27 points instead of 75. Without this, the category with the most
+candidates (usually skills) got the most slots and the lowest grade.
+
 ## Projects
 
 Loupe groups sessions into projects by the git repository each session ran
