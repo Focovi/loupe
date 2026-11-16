@@ -187,10 +187,17 @@ function buildRun({ candidates, gradedRecommendations, profileName, dialWeights 
     profile: profileName,
     dialWeights,
     sessionsAnalyzed: candidates.sessionsAnalyzed,
+    // Grades from different models are not comparable, so the run records
+    // which ones grade.js used (normally exactly one).
+    gradingModels: listGradingModels(gradedRecommendations),
     categories: categoryResults,
     compositeScore: composite,
     compositeGrade: scoreToGrade(composite),
   };
+}
+
+function listGradingModels(gradedRecommendations) {
+  return [...new Set(gradedRecommendations.map((r) => r.grading_model).filter(Boolean))].sort();
 }
 
 function scoreCategory(letter, candidates, gradedRecommendations) {
@@ -299,6 +306,7 @@ function computeDeltas(currentRun, previousRun) {
 
   return {
     previousRunAt: previousRun.generatedAt,
+    previousGradingModels: previousRun.gradingModels || [],
     compositeScoreDelta: currentRun.compositeScore - previousRun.compositeScore,
     perCategory,
     regressions,
@@ -334,6 +342,14 @@ const CATEGORY_LABELS = {
   G: 'Session hygiene',
 };
 
+function describeGradingModelChange(run) {
+  if (!run.deltas || run.gradingModels.length === 0) return null;
+  const previous = run.deltas.previousGradingModels.join(', ') || 'an unrecorded model';
+  const current = run.gradingModels.join(', ');
+  if (previous === current) return null;
+  return `Graded with ${current}; the previous run used ${previous}, so the deltas mix two models.`;
+}
+
 function renderTerminalSummary(run, confirmedRecommendations, reportPath) {
   const lines = [];
   lines.push(`Loupe review: composite grade ${run.compositeGrade} (${run.compositeScore}/100), profile "${run.profile}"`);
@@ -345,6 +361,12 @@ function renderTerminalSummary(run, confirmedRecommendations, reportPath) {
     const delta = run.deltas ? run.deltas.perCategory[letter] : null;
     const arrow = delta ? deltaArrow(delta.direction) : '';
     lines.push(`  ${CATEGORY_LABELS[letter].padEnd(17)} ${cat.grade} (${cat.score}) ${arrow}`);
+  }
+
+  const modelChange = describeGradingModelChange(run);
+  if (modelChange) {
+    lines.push('');
+    lines.push(`⚠ ${modelChange}`);
   }
 
   if (run.deltas && run.deltas.regressions.length > 0) {
