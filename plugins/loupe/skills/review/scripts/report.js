@@ -37,6 +37,9 @@ const CATEGORY_KEYS = {
 };
 
 const PENALTY_PER_CONFIRMED_FINDING = 15;
+// Recorded on every run so deltas can tell when two runs were scored
+// differently. Runs without it used the plain count of gap findings.
+const SCORING_METHOD = 'fair-share/1';
 const PENALTY_REPEAT_UNHEEDED_GUIDELINE = 40;
 const GRADE_CUTOFFS = [
   [90, 'A'],
@@ -176,8 +179,9 @@ function readDefaultProfileName() {
 
 function buildRun({ candidates, gradedRecommendations, profileName, dialWeights }) {
   const categoryResults = {};
+  const fairShare = fairShareOfGradingSlots(candidates);
   for (const letter of Object.keys(CATEGORY_KEYS)) {
-    categoryResults[letter] = scoreCategory(letter, candidates, gradedRecommendations);
+    categoryResults[letter] = scoreCategory(letter, candidates, gradedRecommendations, fairShare);
   }
 
   const composite = computeCompositeScore(categoryResults, dialWeights);
@@ -186,6 +190,7 @@ function buildRun({ candidates, gradedRecommendations, profileName, dialWeights 
     generatedAt: new Date().toISOString(),
     profile: profileName,
     dialWeights,
+    scoringMethod: SCORING_METHOD,
     sessionsAnalyzed: candidates.sessionsAnalyzed,
     // Grades from different models are not comparable, so the run records
     // which ones grade.js used (normally exactly one).
@@ -200,7 +205,28 @@ function listGradingModels(gradedRecommendations) {
   return [...new Set(gradedRecommendations.map((r) => r.grading_model).filter(Boolean))].sort();
 }
 
-function scoreCategory(letter, candidates, gradedRecommendations) {
+// The grading queue gives each category with candidates an equal share of
+// its slots, then hands unused slots to whichever categories have the
+// widest clusters, usually skills. Unscaled, a category that took extra
+// slots found more gaps simply because more of it was graded. Returns
+// Infinity (no scaling) for candidates without a grading queue.
+function fairShareOfGradingSlots(candidates) {
+  const totalSlots = candidates.gradingQueue && candidates.gradingQueue.totalSlots;
+  const categoriesWithCandidates = Object.values(candidates.candidates || {}).filter((c) => c.length > 0).length;
+  if (!totalSlots || categoriesWithCandidates === 0) return Infinity;
+  return totalSlots / categoriesWithCandidates;
+}
+
+// A category graded more than its fair share is scored as if it had been
+// graded its fair share, at the same rate of real gaps: 5 gaps in 9 graded
+// clusters with a fair share of 3 count as 1.7 gaps. A category graded at
+// or under its share counts every gap.
+function effectiveGapCount(gapCount, gradedCount, fairShare) {
+  if (gradedCount <= fairShare) return gapCount;
+  return (gapCount * fairShare) / gradedCount;
+}
+
+function scoreCategory(letter, candidates, gradedRecommendations, fairShare = Infinity) {
   const forThisCategory = gradedRecommendations.filter((r) => r.category === letter);
   const confirmedFindings = forThisCategory.filter((r) => r.recommendation);
   // is_gap defaults true for categories where the rubric never offered a
@@ -211,11 +237,15 @@ function scoreCategory(letter, candidates, gradedRecommendations) {
   const gapFindings = confirmedFindings.filter((r) => r.is_gap !== false);
   const affirmingFindings = confirmedFindings.filter((r) => r.is_gap === false);
 
-  const score = clamp(100 - penaltyForCategory(letter, gapFindings), 0, 100);
+  const gradedCount = countGradedClusters(forThisCategory);
+  const effectiveGaps = effectiveGapCount(gapFindings.length, gradedCount, fairShare);
+  const score = clamp(Math.round(100 - penaltyForCategory(letter, effectiveGaps, gapFindings)), 0, 100);
 
   return {
     score,
     grade: scoreToGrade(score),
+    gradedCount,
+    effectiveGapCount: Math.round(effectiveGaps * 100) / 100,
     heuristicCandidateCount: (candidates.candidates[CATEGORY_KEYS[letter]] || []).length,
     confirmedFindingCount: confirmedFindings.length,
     gapFindingCount: gapFindings.length,
@@ -225,8 +255,14 @@ function scoreCategory(letter, candidates, gradedRecommendations) {
   };
 }
 
-function penaltyForCategory(letter, gapFindings) {
-  let penalty = gapFindings.length * PENALTY_PER_CONFIRMED_FINDING;
+// consolidate.js folds duplicate findings into one, but each one was a
+// graded cluster, so it still counts toward how much was graded.
+function countGradedClusters(graded) {
+  return graded.reduce((count, r) => count + 1 + (Array.isArray(r.merged_findings) ? r.merged_findings.length : 0), 0);
+}
+
+function penaltyForCategory(letter, effectiveGaps, gapFindings) {
+  let penalty = effectiveGaps * PENALTY_PER_CONFIRMED_FINDING;
   if (letter === 'A' && hasUnheededRepeatGuideline(gapFindings)) {
     penalty += PENALTY_REPEAT_UNHEEDED_GUIDELINE;
   }
@@ -307,6 +343,7 @@ function computeDeltas(currentRun, previousRun) {
   return {
     previousRunAt: previousRun.generatedAt,
     previousGradingModels: previousRun.gradingModels || [],
+    previousScoringMethod: previousRun.scoringMethod || null,
     compositeScoreDelta: currentRun.compositeScore - previousRun.compositeScore,
     perCategory,
     regressions,
@@ -350,6 +387,11 @@ function describeGradingModelChange(run) {
   return `Graded with ${current}; the previous run used ${previous}, so the deltas mix two models.`;
 }
 
+function describeScoringChange(run) {
+  if (!run.deltas || run.deltas.previousScoringMethod === run.scoringMethod) return null;
+  return 'The previous run was scored before categories graded past their fair share were scaled, so the deltas compare two scoring methods.';
+}
+
 function renderTerminalSummary(run, confirmedRecommendations, reportPath) {
   const lines = [];
   lines.push(`Loupe review: composite grade ${run.compositeGrade} (${run.compositeScore}/100), profile "${run.profile}"`);
@@ -367,6 +409,12 @@ function renderTerminalSummary(run, confirmedRecommendations, reportPath) {
   if (modelChange) {
     lines.push('');
     lines.push(`⚠ ${modelChange}`);
+  }
+
+  const scoringChange = describeScoringChange(run);
+  if (scoringChange) {
+    lines.push('');
+    lines.push(`⚠ ${scoringChange}`);
   }
 
   if (run.deltas && run.deltas.regressions.length > 0) {
@@ -540,8 +588,13 @@ function renderCategoryRow(letter, run, allRuns, isLinkable) {
     <td><span class="grade-pill grade-${cat.grade}">${escapeHtml(cat.grade)}</span></td>
     <td>${cat.score}</td>
     <td>${renderSparkline(scoreHistory)}<span class="delta-label">${escapeHtml(deltaLabel)}</span></td>
-    <td>${cat.confirmedFindingCount} <span class="muted">(${cat.gapFindingCount} gap, ${cat.affirmingFindingCount} affirming)</span></td>
+    <td>${cat.confirmedFindingCount} <span class="muted">(${cat.gapFindingCount} gap, ${cat.affirmingFindingCount} affirming)</span>${renderScalingNote(cat)}</td>
   </tr>`;
+}
+
+function renderScalingNote(cat) {
+  if (cat.effectiveGapCount === undefined || cat.effectiveGapCount === cat.gapFindingCount) return '';
+  return `<br><span class="muted">scored as ${cat.effectiveGapCount} gaps: ${cat.gradedCount} graded, more than its fair share</span>`;
 }
 
 const SPARKLINE_WIDTH = 80;
@@ -798,4 +851,6 @@ function legacyCopy(text) {
 }
 `;
 
-main();
+if (require.main === module) main();
+
+module.exports = { buildRun, scoreCategory, fairShareOfGradingSlots, effectiveGapCount, computeDeltas, renderTerminalSummary };
