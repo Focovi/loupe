@@ -9,6 +9,9 @@ const {
   isManualWorkTurn,
   collectUsedMcpServers,
   countIndependentSerialChunks,
+  isPersonTypedTurn,
+  detectGuidelineCandidates,
+  correctionRateSlope,
 } = require('../plugins/loupe/skills/review/scripts/heuristics');
 
 function human(text) {
@@ -78,4 +81,50 @@ test('countIndependentSerialChunks counts lookup runs but not Bash pipelines', (
 
   const pipeline = { turns: [assistant(tool('Bash', { command: 'npm run build' }), tool('Bash', { command: 'npm test' }), tool('Bash', { command: 'git commit -m x' }))] };
   assert.equal(countIndependentSerialChunks(pipeline), 0);
+});
+
+const COMPACTION_SUMMARY = 'This session is being continued from a previous conversation. Never commit generated files.';
+
+test('isPersonTypedTurn drops injected user-role text', () => {
+  assert.equal(isPersonTypedTurn(human("don't touch the lockfile")), true);
+  assert.equal(isPersonTypedTurn(human(COMPACTION_SUMMARY)), false);
+  assert.equal(isPersonTypedTurn(human('<system-reminder>never skip hooks</system-reminder>')), false);
+  assert.equal(isPersonTypedTurn(human('<scheduled-task>always run the report</scheduled-task>')), false);
+  assert.equal(isPersonTypedTurn(human('<cross-session-message>stop doing that</cross-session-message>')), false);
+  assert.equal(isPersonTypedTurn(human('<artifact-view-context>never mind</artifact-view-context>')), false);
+  assert.equal(isPersonTypedTurn(human('[Request interrupted by user for tool use]')), false);
+  assert.equal(isPersonTypedTurn(human('Background (from the session that started this one): never push to main.')), false);
+});
+
+test('detectGuidelineCandidates ignores injected corrections', () => {
+  const injected = '<system-reminder>never edit generated files</system-reminder>';
+  const sessions = [
+    { sessionId: 's1', turns: [human(injected), human("don't use var, use const")] },
+    { sessionId: 's2', turns: [human(injected), human("don't use var here, use const")] },
+  ];
+  const clusters = detectGuidelineCandidates(new Map([['repo', sessions]]));
+  assert.equal(clusters.length, 1);
+  assert.match(clusters[0].representativeText, /use const/);
+  assert.deepEqual(clusters[0].evidenceSessionIds, ['s1', 's2']);
+});
+
+test('detectGuidelineCandidates finds nothing when only injected text repeats', () => {
+  const injected = '<system-reminder>never edit generated files</system-reminder>';
+  const sessions = [
+    { sessionId: 's1', turns: [human(injected), human('looks good')] },
+    { sessionId: 's2', turns: [human(injected), human('ship it')] },
+  ];
+  assert.deepEqual(detectGuidelineCandidates(new Map([['repo', sessions]])), []);
+});
+
+test('correctionRateSlope skips injected turns when windowing', () => {
+  const calm = Array.from({ length: 20 }, () => human('next step please'));
+  const reminders = Array.from({ length: 10 }, () => human("<system-reminder>don't skip tests</system-reminder>"));
+  assert.equal(correctionRateSlope({ turns: [...calm, ...reminders] }), 0);
+});
+
+test('correctionRateSlope still sees rising typed corrections', () => {
+  const calm = Array.from({ length: 10 }, () => human('next step please'));
+  const corrections = Array.from({ length: 10 }, () => human("no, don't do that"));
+  assert.equal(correctionRateSlope({ turns: [...calm, human(COMPACTION_SUMMARY), ...corrections] }), 1);
 });
