@@ -61,3 +61,32 @@ test('LOUPE_CLAUDE_BIN overrides the lookup', () => {
   const invocation = buildClaudeInvocation(CLAUDE_ARGS, { platform: 'linux', env: { LOUPE_CLAUDE_BIN: '/opt/claude/bin/claude' } });
   assert.equal(invocation.command, '/opt/claude/bin/claude');
 });
+
+test('the Claude Code running the session is used when claude is not on PATH', () => {
+  const execPath = '/Applications/Claude/claude-code/2.1.0/claude';
+
+  const invocation = buildClaudeInvocation(CLAUDE_ARGS, { platform: 'darwin', env: { CLAUDE_CODE_EXECPATH: execPath } });
+
+  assert.equal(invocation.command, execPath);
+});
+
+test('LOUPE_CLAUDE_BIN wins over the running Claude Code', () => {
+  const env = { LOUPE_CLAUDE_BIN: '/opt/claude/bin/claude', CLAUDE_CODE_EXECPATH: '/Applications/Claude/claude' };
+
+  const invocation = buildClaudeInvocation(CLAUDE_ARGS, { platform: 'darwin', env });
+
+  assert.equal(invocation.command, '/opt/claude/bin/claude');
+});
+
+test('Windows runs the running Claude Code without a PATH lookup', () => {
+  const execPath = 'C:\\Users\\alex\\AppData\\Roaming\\Claude\\claude-code\\claude.exe';
+
+  const invocation = buildClaudeInvocation(CLAUDE_ARGS, {
+    platform: 'win32',
+    env: { CLAUDE_CODE_EXECPATH: execPath },
+    findOnPath: () => assert.fail('PATH should not be searched'),
+  });
+
+  assert.equal(invocation.command, execPath);
+  assert.equal(invocation.windowsVerbatimArguments, false);
+});

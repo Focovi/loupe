@@ -21,15 +21,17 @@ No hosted backend, no account, no payment. Everything runs locally.
 
 ## Requirements
 
-Every OS needs the Claude Code CLI (`claude`) on your `PATH` and signed
-in, and Node.js 18 or later (`node`). Loupe's scripts are plain Node with
-no dependencies and no install step.
+Every OS needs Claude Code, signed in, either the desktop app or the CLI,
+and Node.js 18 or later (`node`) on your `PATH`. Loupe's scripts are plain
+Node with no dependencies and no install step. The grader runs the same
+Claude Code your session runs (`CLAUDE_CODE_EXECPATH`), so the desktop app
+needs no `claude` on your `PATH`.
 
 | OS | Also needed | Notes |
 | --- | --- | --- |
 | macOS | nothing | |
 | Linux | nothing | The report opens with `xdg-open`. |
-| Windows | Git for Windows (Git Bash) | Claude Code runs its Bash tool through Git Bash. The grader starts `claude.exe` (native install) or `claude.cmd` (npm install) without a shell. Set `LOUPE_CLAUDE_BIN` to the full path if `claude` is not on `PATH`. |
+| Windows | Git for Windows (Git Bash) | Claude Code runs its Bash tool through Git Bash. The grader starts `claude.exe` (native install) or `claude.cmd` (npm install) without a shell. Set `LOUPE_CLAUDE_BIN` to a full path to use a different `claude`. |
 
 ## Grading model
 
