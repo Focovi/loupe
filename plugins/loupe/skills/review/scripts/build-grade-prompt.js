@@ -3,7 +3,7 @@
 
 /**
  * Builds the grading prompt for a single candidate cluster (Full Spec §3).
- * Not invoked directly by the skill — grade.sh shells out to this to
+ * Not invoked directly by the skill — grade.js runs this to
  * compose the rubric + evidence digest before calling the pinned model.
  *
  * Usage: node build-grade-prompt.js <category> <clusterJsonPath> <digestJsonPath>
