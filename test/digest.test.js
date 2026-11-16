@@ -35,3 +35,19 @@ test('buildDigestBundle stops shrinking at the turn floor', () => {
   const bundle = buildDigestBundle([longSession('s1', 200)], { maxChars: 10 });
   assert.equal(bundle.maxTurnsPerSession, 10);
 });
+
+test('findSessionsById opens files named by session and falls back to a scan', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { findSessionsById } = require('../plugins/loupe/skills/review/scripts/heuristics');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'loupe-digest-test-'));
+  const line = (sessionId) => JSON.stringify({ type: 'user', sessionId, message: { role: 'user', content: 'hi' } }) + '\n';
+  fs.writeFileSync(path.join(dir, 'aaa.jsonl'), line('aaa'));
+  fs.writeFileSync(path.join(dir, 'renamed.jsonl'), line('bbb'));
+  fs.writeFileSync(path.join(dir, 'ccc.jsonl'), line('ccc'));
+  const files = ['aaa', 'renamed', 'ccc'].map((name) => path.join(dir, `${name}.jsonl`));
+
+  const found = findSessionsById(['bbb', 'aaa', 'missing'], files);
+  assert.deepEqual(found.map((s) => s.sessionId), ['bbb', 'aaa']);
+});

@@ -218,19 +218,34 @@ function dumpSchema() {
 
 function printDigest(sessionIds) {
   const includedIds = sessionIds.slice(0, DIGEST_MAX_SESSIONS);
-  const wanted = new Set(includedIds);
-  const files = discoverTranscriptFiles();
-  const sessions = [];
-
-  for (const file of files) {
-    if (sessions.length === wanted.size) break;
-    const session = safeParseTranscriptFile(file);
-    if (!session || !wanted.has(session.sessionId)) continue;
-    sessions.push(session);
-  }
-
+  const sessions = findSessionsById(includedIds, discoverTranscriptFiles());
   const bundle = buildDigestBundle(sessions, { sessionsRequested: sessionIds.length });
   process.stdout.write(JSON.stringify(bundle, null, 2) + '\n');
+}
+
+// A transcript is normally named <sessionId>.jsonl, so those are opened
+// directly. Parsing every file until the right ones turn up took about 10
+// seconds per grading call on a large history; the full scan is kept only
+// for the few sessions whose file is named differently.
+function findSessionsById(sessionIds, files) {
+  const wanted = new Set(sessionIds);
+  const found = new Map();
+  const filesByName = new Map(files.map((file) => [path.basename(file, '.jsonl'), file]));
+
+  for (const sessionId of wanted) {
+    const file = filesByName.get(sessionId);
+    const session = file ? safeParseTranscriptFile(file) : null;
+    if (session && session.sessionId === sessionId) found.set(sessionId, session);
+  }
+
+  for (const file of files) {
+    if (found.size === wanted.size) break;
+    if (found.has(path.basename(file, '.jsonl'))) continue;
+    const session = safeParseTranscriptFile(file);
+    if (session && wanted.has(session.sessionId) && !found.has(session.sessionId)) found.set(session.sessionId, session);
+  }
+
+  return sessionIds.filter((id) => found.has(id)).map((id) => found.get(id));
 }
 
 // Halves the turns kept per session until the digests fit the budget, so a
@@ -1206,4 +1221,5 @@ module.exports = {
   correctionRateSlope,
   buildDigestBundle,
   buildSessionDigest,
+  findSessionsById,
 };
