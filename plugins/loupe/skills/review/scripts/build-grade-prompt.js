@@ -26,12 +26,13 @@ const OUTPUT_CONTRACT = `Respond with ONLY a single JSON object (no markdown fen
   "category": "<the category letter>",
   "evidence_session_ids": ["<session ids this recommendation is grounded in>"],
   "is_gap": <true if this documents something missing/wrong that needs fixing, false if the evidence actually shows GOOD behavior worth codifying/preserving as a rule (e.g. a model switch that correctly matched task complexity, or work that was correctly kept serial) — categories E and F in particular can go either way; don't force a gap framing onto a positive finding>,
-  "recommendation": "<2-4 sentence human-readable recommendation>",
+  "title": "<the change to make, as an imperative phrase of at most 10 words, e.g. \"Add a skill for the dev deploy\">",
+  "recommendation": "<at most 2 sentences and 50 words: what the evidence shows and why the change helps. Leave session IDs, ticket keys and step-by-step detail to evidence_session_ids and proposed_artifact>",
   "proposed_artifact": "<the literal text/config/skeleton this category's Output column calls for>",
   "apply_prompt": "<a self-contained prompt a person could paste into a fresh Claude Code session to make this change — include target file path, exact change, and a verification step>"
 }
 If, after reviewing the evidence, you conclude the heuristic pre-filter was wrong and this isn't actually a real recommendation, respond instead with:
-{"category": "<letter>", "evidence_session_ids": [], "is_gap": null, "recommendation": null, "proposed_artifact": null, "apply_prompt": null, "rejected_reason": "<why the evidence doesn't support this>"}
+{"category": "<letter>", "evidence_session_ids": [], "is_gap": null, "title": null, "recommendation": null, "proposed_artifact": null, "apply_prompt": null, "rejected_reason": "<why the evidence doesn't support this>"}
 
 Style: do not use em dashes (—) anywhere in any field. Use a comma, period, colon, or parentheses instead.`;
 

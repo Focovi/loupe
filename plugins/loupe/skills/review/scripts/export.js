@@ -82,6 +82,7 @@ function buildExport(run, developer, redactTerms) {
         isGap: finding.is_gap !== false,
         evidenceSessionCount: (finding.evidence_session_ids || []).length,
         mergedFindingCount: (finding.merged_findings || []).length,
+        title: finding.title ? scrub(finding.title) : null,
         recommendation: scrub(finding.recommendation),
         proposedArtifact: scrub(finding.proposed_artifact),
       });
@@ -137,7 +138,8 @@ function renderPreview(exported) {
   lines.push('', `Findings (${exported.findings.length}), exactly as they will be shared:`);
   exported.findings.forEach((finding, index) => {
     const kind = finding.isGap ? 'gap' : 'good habit';
-    lines.push('', `${index + 1}. [${CATEGORY_LABELS[finding.category]}, ${kind}] ${finding.recommendation}`);
+    const heading = finding.title ? `${finding.title}. ${finding.recommendation}` : finding.recommendation;
+    lines.push('', `${index + 1}. [${CATEGORY_LABELS[finding.category]}, ${kind}] ${heading}`);
     if (finding.proposedArtifact) lines.push(indent(finding.proposedArtifact));
   });
   lines.push(

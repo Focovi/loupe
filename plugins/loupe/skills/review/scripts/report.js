@@ -23,8 +23,10 @@ const HOME_DIR = os.homedir();
 const RUNS_DIR = path.join(HOME_DIR, '.loupe', 'runs');
 const REPORTS_DIR = path.join(HOME_DIR, '.loupe', 'reports');
 const CONFIG_FILE = path.join(HOME_DIR, '.loupe', 'config.json');
-const TERMINAL_SUMMARY_MAX_RECOMMENDATIONS = 8;
-const TERMINAL_SUMMARY_MIN_RECOMMENDATIONS = 5;
+const TERMINAL_SUMMARY_MAX_RECOMMENDATIONS = 5;
+// Runs graded before findings had a title fall back to a clipped first
+// sentence, so the summary stays one short line per finding.
+const SUMMARY_LINE_MAX_CHARS = 90;
 
 const CATEGORY_KEYS = {
   A: 'A_guidelines',
@@ -432,7 +434,7 @@ function renderTerminalSummary(run, confirmedRecommendations, reportPath) {
   } else {
     lines.push(`Top recommendations (${ranked.length}):`);
     for (const rec of ranked) {
-      lines.push(`  (${CATEGORY_LABELS[rec.category]}) ${firstSentence(rec.recommendation)}`);
+      lines.push(`  (${CATEGORY_LABELS[rec.category]}) ${summaryLine(rec)}`);
     }
   }
 
@@ -465,6 +467,12 @@ function rankScore(recommendation, dialWeights) {
   const relevance = CATEGORY_DIAL_RELEVANCE[recommendation.category];
   const profileFit = relevance ? dotProduct(dialWeights, relevance) : 1;
   return frequency * profileFit;
+}
+
+function summaryLine(rec) {
+  if (rec.title) return rec.title;
+  const sentence = firstSentence(rec.recommendation);
+  return sentence.length <= SUMMARY_LINE_MAX_CHARS ? sentence : `${sentence.slice(0, SUMMARY_LINE_MAX_CHARS - 1).trimEnd()}…`;
 }
 
 function firstSentence(text) {
@@ -648,6 +656,7 @@ function renderRecommendationCard(rec) {
     ${affirmingTag}
     ${dialTags}
   </div>
+  <h4 class="rec-title">${escapeHtml(summaryLine(rec))}</h4>
   <p class="rec-text">${escapeHtml(rec.recommendation)}</p>
   <details class="artifact-details">
     <summary>Proposed artifact &amp; apply prompt</summary>
@@ -668,7 +677,7 @@ function renderRecommendationCard(rec) {
 function renderMergedFindings(mergedFindings) {
   if (!Array.isArray(mergedFindings) || mergedFindings.length === 0) return '';
   const label = mergedFindings.length === 1 ? '1 similar finding' : `${mergedFindings.length} similar findings`;
-  const items = mergedFindings.map((f) => `<li>${escapeHtml(f.recommendation)}</li>`).join('');
+  const items = mergedFindings.map((f) => `<li>${escapeHtml(summaryLine(f))}</li>`).join('');
   return `<details class="artifact-details">
     <summary>Also seen as ${label}, counted once</summary>
     <ul>${items}</ul>
@@ -785,6 +794,7 @@ p { margin: 0.4rem 0; }
 .rec-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
 .tag { font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 999px; background: color-mix(in srgb, var(--status-good) 16%, var(--surface-1)); color: var(--status-good); }
 .tag-dial { background: var(--page-plane); color: var(--text-secondary); border: 1px solid var(--border); }
+.rec-title { font-size: 1rem; margin: 0.4rem 0 0.2rem; }
 .rec-text { font-size: 0.93rem; }
 .artifact-details { margin-top: 0.5rem; }
 .artifact-details summary {
