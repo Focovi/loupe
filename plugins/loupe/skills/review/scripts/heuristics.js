@@ -21,6 +21,14 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const {
+  matchMcpServerName,
+  readUserMcpServers,
+  readProjectMcpServers,
+  readPluginMcpServers,
+  readFollowUpHookCommands,
+} = require('./claude-config');
+const { buildGradingQueue } = require('./grading-queue');
 
 const HOME_DIR = os.homedir();
 const PROJECTS_DIR = path.join(HOME_DIR, '.claude', 'projects');
@@ -61,10 +69,79 @@ const REAL_MODEL_NAME_PATTERN = /claude/i;
 // A, then file B, then file C") instead of padding the threshold to
 // compensate for a weaker filter.
 const INDEPENDENT_RUN_MIN_LENGTH = 3;
+// Claude Code renamed the subagent tool from Task to Agent; transcripts
+// from either era must count, or every session reads as "never delegated".
+const SUBAGENT_TOOL_NAMES = new Set(['Task', 'Agent']);
+// Only lookups can be independent chunks. Consecutive Bash calls with
+// different commands are almost always one dependent pipeline (build,
+// test, commit), and counting them flagged most sessions as parallelizable.
+const INDEPENDENT_LOOKUP_TOOL_NAMES = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']);
+const READ_ONLY_BASH_PATTERN = /^\s*(cat|head|tail|sed -n|grep|rg|ls|find|wc|jq|git (log|show|diff|blame)|gh (pr|issue|run) (view|list|diff))\b/;
+const TRIVIAL_SUBAGENT_PROMPT_MAX_CHARS = 200;
+
+// Wide clusters keep a sample of evidence sessions (each one is digested
+// into the grading prompt) and report the full count beside it.
+const MAX_EVIDENCE_SESSIONS = 8;
+const CLUSTER_SAMPLE_COUNT = 3;
+const CLUSTER_SAMPLE_TEXT_CHARS = 160;
+const HOOK_REQUEST_MAX_CHARS = 300;
+// How far back to look for the edit a follow-up request reacts to.
+const EDIT_LOOKBACK_MAX_TURNS = 200;
+// Typed asks are short; a long turn that mentions copying or a console is
+// usually a brief or a pasted document. Pasted blocks don't count.
+const MANUAL_WORK_MAX_TYPED_CHARS = 500;
+// Below these, "never called" says more about the sample than the server.
+const MIN_SESSIONS_FOR_USER_MCP_UNDERUSE = 10;
+const MIN_SESSIONS_FOR_PROJECT_MCP_UNDERUSE = 3;
+const ALL_PROJECTS_GROUP = '(all projects)';
 
 const CORRECTION_PATTERN = /\b(no+,|don'?t|never|always|instead|stop doing|actually,? (please|just)?|please stop|that'?s wrong|not like that)\b/i;
-const HOOK_REQUEST_PATTERN = /\b(run (the )?(lint|tests?|typecheck|format(ter)?)|please (lint|format|test)|check for [a-z ]+ tells?|run tsc)\b/i;
-const MANUAL_WORK_PATTERN = /\b(copy(-| )?paste|paste this|from the browser|manually (check|copy|update|paginate)|switch(ing)? tabs? to (check|copy|grab))\b/i;
+// Each action pairs the phrasings people use to ask for a fixed follow-up
+// check with the command shape of a hook that would already do it.
+// Phrasings come from real transcripts ("run all tests", "build, run all
+// tests", "let's fix the dotnet format"); "format it for slack" and other
+// non-code formatting is deliberately excluded.
+const HOOK_ACTIONS = [
+  {
+    action: 'test',
+    request: /\b(re-?run|run) (all |the |all the |unit |integration |e2e |full |the full |the unit |the integration )?(tests?|test suite|specs)\b(?! plan)|\bmake sure (all )?(the )?tests? (still )?pass|\b(npm|pnpm|yarn|bun) (run )?test\b|\b(dotnet|go|cargo) test\b|\bpytest\b|\b(do|did) (the |all )?tests? pass/i,
+    hookCommand: /\b(tests?|jest|vitest|pytest|mocha|rspec|phpunit)\b/i,
+  },
+  {
+    action: 'lint',
+    request: /\b(re-?run|run|fix) (the )?(lint(er|ers|ing)?|eslint|ruff|rubocop|golangci-lint)\b|\blint (it|this|that|the (code|files?|changes))\b|\b(npm|pnpm|yarn|bun) (run )?lint\b/i,
+    hookCommand: /\b(lint|eslint|ruff|rubocop|golangci-lint|stylelint)\b/i,
+  },
+  {
+    action: 'format',
+    request: /\b(re-?run|run|fix) (the )?(prettier|formatter|dotnet format|csharpier|black|gofmt|rustfmt)\b|\bformat the (code|files?|changes)\b(?!\s+(for|to|as|in|so|like|into))|\b(dotnet format|npx prettier|prettier --(write|check)|ruff format)\b/i,
+    hookCommand: /\b(format|prettier|black|csharpier|gofmt|rustfmt|fmt)\b/i,
+  },
+  {
+    action: 'typecheck',
+    request: /\b(re-?run|run|fix) (the )?(tsc|typecheck|type-?check(er|ing)?|type errors|mypy|pyright)\b|\btsc --noEmit\b/i,
+    hookCommand: /\b(tsc|typecheck|type-check|mypy|pyright)\b/i,
+  },
+  {
+    action: 'build',
+    request: /\b(re-?run|run|fix) (the )?build\b|\b(check|verify|make sure|confirm) (that )?(the |it )?(builds?|compiles?)\b|\bdoes it (still )?(build|compile)\b|\b(dotnet|npm run|pnpm|yarn|cargo|go|swift|xcodebuild) build\b|^build(,|\s+(and|then)\b)/i,
+    hookCommand: /\b(build|compile|xcodebuild)\b/i,
+  },
+];
+// Manual relaying of something an MCP could fetch or do directly: copying
+// between tools, checking a console or dashboard by hand, or pasting an
+// error or log output into the chat.
+const MANUAL_WORK_PATTERN = /\b(copy(-| )?past(e|ed|ing)|i (copied|pasted|grabbed|exported|downloaded)|paste (this|it|the [a-z]+) (in|into|here)|from the (browser|console|dashboard|portal|web ui|website)|manually (check(ed|ing)?|cop(y|ied)|updat(e|ed|ing)|paginat(e|ing)|deploy(ed|ing)?|run|ran|enter(ed)?|typ(e|ed)|scan(ned)?|add(ed)?|trigger(ed)?|creat(e|ed))|by hand|switch(ing)? tabs?|in the (aws |azure |gcp )?console|check (the )?([\w.-]+ ){0,3}(logs|alarms?|dashboards?|metrics|traces) (in|on|from)|i (checked|looked) (in|on|at) (the )?[\w.-]+ (ui|dashboard|console|portal))\b/i;
+const PASTED_EXTERNAL_OUTPUT_PATTERN = /<pasted_content\b[^>]*>[\s\S]*?\b(error|exception|traceback|stack ?trace|failed|fatal)\b/i;
+// User-role turns the person didn't type: compaction summaries, system
+// reminders, scheduled-task prompts and other injected context. Their
+// boilerplate ("never edit generated files by hand") matched hundreds of
+// times and drowned out what people actually asked for.
+const INJECTED_TURN_PATTERN = /^\s*(<(system-reminder|scheduled-task|command-[a-z]+|local-command-[a-z]+|task-notification|cross-session-message|artifact-content[a-z-]*|side-sessions-event|ci-monitor-event|bash-[a-z]+)\b|This session is being continued from a previous conversation|Caveat: )/i;
+const PASTED_CONTENT_BLOCK_PATTERN = /<pasted_content\b[^>]*>[\s\S]*?<\/pasted_content[^>]*>/gi;
+// Bash commands that write files, for sessions that edit without the Edit
+// tool (heredocs, sed -i, scripted rewrites).
+const BASH_FILE_EDIT_PATTERN = /\bsed\s+-i|\bperl\s+-p?i|\bapply_patch\b|\bgit apply\b|\bcat\s*>{1,2}\s*[^&\s]|\btee\s+(-a\s+)?[^|\s-]|\bopen\([^)]*,\s*['"][wa]/;
 const EDIT_TOOL_NAMES = new Set(['Edit', 'Write', 'NotebookEdit']);
 
 function main() {
@@ -322,6 +399,13 @@ function isHumanTypedTurn(turn) {
   return turn.type === 'user' && !turn.isMeta && !turn.isToolResultTurn && typeof turn.text === 'string' && turn.text.trim().length > 0;
 }
 
+// Stricter than isHumanTypedTurn: also drops injected context that arrives
+// as a user turn. Used by the C and D detectors, whose phrase matching is
+// most sensitive to that boilerplate.
+function isPersonTypedTurn(turn) {
+  return isHumanTypedTurn(turn) && !INJECTED_TURN_PATTERN.test(turn.text);
+}
+
 // ---------------------------------------------------------------------------
 // Project grouping (§1.1)
 // ---------------------------------------------------------------------------
@@ -531,20 +615,109 @@ function buildToolSequenceSignature(session) {
 // Category C — Hooks (settings.json)
 // ---------------------------------------------------------------------------
 
+// A request only points at a hook when it is the same fixed follow-up each
+// time, so matches are grouped by action (tests, lint, ...) rather than by
+// wording: "run all tests" and "build, then run the tests before I merge"
+// are the same missing hook. Actions that recur within one project become
+// project clusters; the rest, when they recur across projects, become one
+// user-level cluster (a Stop hook in ~/.claude/settings.json covers all).
 function detectHookCandidates(groupedSessions) {
-  return detectRecurringTurnPatternCandidates(groupedSessions, (turn, session, index) => {
-    if (!HOOK_REQUEST_PATTERN.test(turn.text)) return false;
-    return followsFileEditTool(session.turns, index);
-  });
+  const clusters = [];
+  const unclusteredByAction = new Map();
+
+  for (const [groupName, sessions] of groupedSessions) {
+    const existingHookCommands = readFollowUpHookCommands(distinctSessionCwds(sessions));
+    for (const [action, requests] of collectHookRequestsByAction(sessions)) {
+      if (existingHookCommands.some((command) => hookCommandCoversAction(command, action))) continue;
+      // Recurring means across sessions; asking twice in one sitting is not.
+      if (new Set(requests.map((request) => request.sessionId)).size >= MIN_CLUSTER_SIZE) {
+        clusters.push(buildHookCluster(groupName, 'project', action, requests));
+        continue;
+      }
+      if (!unclusteredByAction.has(action)) unclusteredByAction.set(action, []);
+      unclusteredByAction.get(action).push(...requests.map((request) => ({ ...request, group: groupName })));
+    }
+  }
+
+  const userHookCommands = readFollowUpHookCommands([]);
+  for (const [action, requests] of unclusteredByAction) {
+    const groupCount = new Set(requests.map((request) => request.group)).size;
+    if (groupCount < MIN_CLUSTER_SIZE) continue;
+    if (userHookCommands.some((command) => hookCommandCoversAction(command, action))) continue;
+    clusters.push({ ...buildHookCluster(ALL_PROJECTS_GROUP, 'user', action, requests), projectCount: groupCount });
+  }
+  return clusters;
 }
 
+function buildHookCluster(groupName, scope, action, requests) {
+  return {
+    group: groupName,
+    scope,
+    action,
+    representativeText: truncate(requests[0].text, CLUSTER_SAMPLE_TEXT_CHARS),
+    sampleTexts: requests.slice(0, CLUSTER_SAMPLE_COUNT).map((r) => truncate(r.text, CLUSTER_SAMPLE_TEXT_CHARS)),
+    occurrenceCount: requests.length,
+    ...cappedEvidence(requests.map((r) => r.sessionId)),
+  };
+}
+
+function collectHookRequestsByAction(sessions) {
+  const requestsByAction = new Map();
+  for (const session of sessions) {
+    session.turns.forEach((turn, index) => {
+      if (!isPersonTypedTurn(turn)) return;
+      const text = turn.text.trim();
+      if (text.length > HOOK_REQUEST_MAX_CHARS) return;
+      const actions = classifyHookRequest(text);
+      if (actions.length === 0 || !followsFileEditTool(session.turns, index)) return;
+      for (const action of actions) {
+        if (!requestsByAction.has(action)) requestsByAction.set(action, []);
+        requestsByAction.get(action).push({ sessionId: session.sessionId, text });
+      }
+    });
+  }
+  return requestsByAction;
+}
+
+function classifyHookRequest(text) {
+  return HOOK_ACTIONS.filter((hookAction) => hookAction.request.test(text)).map((hookAction) => hookAction.action);
+}
+
+function hookCommandCoversAction(command, action) {
+  const hookAction = HOOK_ACTIONS.find((candidate) => candidate.action === action);
+  return !!hookAction && hookAction.hookCommand.test(command);
+}
+
+// A follow-up check only makes sense once the session has changed files.
+// The edit is often several replies back ("run all tests before I merge"
+// comes after review and a summary), not in the last few turns, and many
+// sessions edit through Bash rather than the Edit tool.
 function followsFileEditTool(turns, currentIndex) {
-  for (let i = currentIndex - 1; i >= 0 && i >= currentIndex - 3; i--) {
-    const priorTurn = turns[i];
-    const editedFile = priorTurn.toolUses.some((toolUse) => EDIT_TOOL_NAMES.has(toolUse.name));
-    if (editedFile) return true;
+  const earliestIndex = Math.max(0, currentIndex - EDIT_LOOKBACK_MAX_TURNS);
+  for (let i = currentIndex - 1; i >= earliestIndex; i--) {
+    if (turns[i].toolUses.some(isFileEditToolUse)) return true;
   }
   return false;
+}
+
+function isFileEditToolUse(toolUse) {
+  if (EDIT_TOOL_NAMES.has(toolUse.name)) return true;
+  const command = toolUse.name === 'Bash' && toolUse.input ? toolUse.input.command : null;
+  return typeof command === 'string' && BASH_FILE_EDIT_PATTERN.test(command);
+}
+
+function distinctSessionCwds(sessions) {
+  return [...new Set(sessions.map((s) => s.cwd).filter(Boolean))];
+}
+
+// Grading digests every evidence session, so wide clusters carry a sample
+// plus the full count (which the grading queue ranks reach by).
+function cappedEvidence(sessionIds) {
+  const distinctIds = [...new Set(sessionIds)];
+  return {
+    evidenceSessionIds: distinctIds.slice(0, MAX_EVIDENCE_SESSIONS),
+    evidenceSessionCount: distinctIds.length,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -552,55 +725,111 @@ function followsFileEditTool(turns, currentIndex) {
 // ---------------------------------------------------------------------------
 
 function detectMcpCandidates(groupedSessions) {
-  const clusters = [];
+  const userServers = [...new Set([...readUserMcpServers(), ...readPluginMcpServers()])];
+  const allSessions = [...groupedSessions.values()].flat();
+  const clusters = [...detectUnusedUserMcpServers(userServers, allSessions)];
+
   for (const [groupName, sessions] of groupedSessions) {
-    clusters.push(...detectUnusedMcpServers(groupName, sessions));
-    clusters.push(...detectManualWorkGap(groupName, sessions));
+    const projectServers = readConfiguredMcpServers(distinctSessionCwds(sessions));
+    clusters.push(...detectUnusedMcpServers(groupName, sessions, projectServers));
+    clusters.push(...detectManualWorkGap(groupName, sessions, [...userServers, ...projectServers]));
   }
   return clusters;
 }
 
-function detectUnusedMcpServers(groupName, sessions) {
-  const repoPath = sessions.find((s) => s.cwd)?.cwd;
-  const configuredServers = repoPath ? readConfiguredMcpServers(repoPath) : [];
-  const usedServers = collectUsedMcpServers(sessions);
-  const unusedServers = configuredServers.filter((serverName) => !usedServers.has(serverName));
-
+// User-level and plugin servers load in every project, so their underuse
+// is judged once across every analyzed session; judged per project, each
+// project that simply doesn't need a server would raise its own cluster.
+function detectUnusedUserMcpServers(userServers, allSessions) {
+  if (allSessions.length < MIN_SESSIONS_FOR_USER_MCP_UNDERUSE) return [];
+  const usedServers = collectUsedMcpServers(allSessions, userServers);
+  const unusedServers = userServers.filter((serverName) => !usedServers.has(serverName));
   if (unusedServers.length === 0) return [];
-  return [{ group: groupName, signal: 'underuse', unusedServers, evidenceSessionIds: sessions.map((s) => s.sessionId) }];
+  return [{
+    group: ALL_PROJECTS_GROUP,
+    signal: 'underuse',
+    scope: 'user',
+    unusedServers,
+    sessionsConsidered: allSessions.length,
+    ...cappedEvidence(mostRecentSessionIds(allSessions)),
+  }];
 }
 
-function detectManualWorkGap(groupName, sessions) {
-  const manualWorkSessionIds = [];
+function detectUnusedMcpServers(groupName, sessions, projectServers) {
+  if (projectServers.length === 0 || sessions.length < MIN_SESSIONS_FOR_PROJECT_MCP_UNDERUSE) return [];
+  const usedServers = collectUsedMcpServers(sessions, projectServers);
+  const unusedServers = projectServers.filter((serverName) => !usedServers.has(serverName));
+  if (unusedServers.length === 0) return [];
+  return [{
+    group: groupName,
+    signal: 'underuse',
+    scope: 'project',
+    unusedServers,
+    sessionsConsidered: sessions.length,
+    ...cappedEvidence(mostRecentSessionIds(sessions)),
+  }];
+}
+
+function detectManualWorkGap(groupName, sessions, availableServers) {
+  const matches = [];
   for (const session of sessions) {
     for (const turn of session.turns) {
-      if (isHumanTypedTurn(turn) && MANUAL_WORK_PATTERN.test(turn.text)) {
-        manualWorkSessionIds.push(session.sessionId);
+      if (isPersonTypedTurn(turn) && isManualWorkTurn(turn.text)) {
+        matches.push({ sessionId: session.sessionId, text: turn.text.trim() });
       }
     }
   }
 
-  if (manualWorkSessionIds.length < MIN_CLUSTER_SIZE) return [];
-  return [{ group: groupName, signal: 'gap', evidenceSessionIds: [...new Set(manualWorkSessionIds)] }];
+  const evidence = cappedEvidence(matches.map((m) => m.sessionId));
+  if (evidence.evidenceSessionCount < MIN_CLUSTER_SIZE) return [];
+  return [{
+    group: groupName,
+    signal: 'gap',
+    occurrenceCount: matches.length,
+    sampleTexts: matches.slice(0, CLUSTER_SAMPLE_COUNT).map((m) => truncate(m.text, CLUSTER_SAMPLE_TEXT_CHARS)),
+    // Lets the grader tell "add an MCP" apart from "use the one you have".
+    availableMcpServers: availableServers,
+    ...evidence,
+  }];
 }
 
-function readConfiguredMcpServers(repoPath) {
-  const mcpConfig = readJsonSafe(path.join(repoPath, '.mcp.json'), null);
-  if (!mcpConfig || typeof mcpConfig.mcpServers !== 'object') return [];
-  return Object.keys(mcpConfig.mcpServers);
+function isManualWorkTurn(text) {
+  if (INJECTED_TURN_PATTERN.test(text)) return false;
+  const typedText = text.replace(PASTED_CONTENT_BLOCK_PATTERN, ' ');
+  if (typedText.length > MANUAL_WORK_MAX_TYPED_CHARS) return false;
+  return MANUAL_WORK_PATTERN.test(typedText) || PASTED_EXTERNAL_OUTPUT_PATTERN.test(text);
 }
 
-function collectUsedMcpServers(sessions) {
+// Project-scoped servers for the folders a group's sessions ran in: each
+// folder's .mcp.json plus its ~/.claude.json projects entry. User-level and
+// plugin servers are read separately (see detectMcpCandidates).
+function readConfiguredMcpServers(projectPaths) {
+  const names = new Set();
+  for (const projectPath of projectPaths) {
+    for (const name of readProjectMcpServers(projectPath)) names.add(name);
+    for (const name of readPluginMcpServers(projectPath)) names.add(name);
+  }
+  return [...names];
+}
+
+function collectUsedMcpServers(sessions, serverNames) {
   const used = new Set();
+  if (serverNames.length === 0) return used;
   for (const session of sessions) {
     for (const turn of session.turns) {
       for (const toolUse of turn.toolUses) {
-        const match = /^mcp__([^_]+)__/.exec(toolUse.name || '');
-        if (match) used.add(match[1]);
+        const serverName = matchMcpServerName(toolUse.name, serverNames);
+        if (serverName) used.add(serverName);
       }
     }
   }
   return used;
+}
+
+function mostRecentSessionIds(sessions) {
+  return [...sessions]
+    .sort((a, b) => (getSessionLastActivityTimestamp(b) || '').localeCompare(getSessionLastActivityTimestamp(a) || ''))
+    .map((s) => s.sessionId);
 }
 
 // ---------------------------------------------------------------------------
@@ -638,24 +867,57 @@ function detectModelRoutingCandidates(groupedSessions) {
 // Category F — Single-agent vs multi-agent (Task tool)
 // ---------------------------------------------------------------------------
 
+// One cluster per project and signal, not per session: the grader judges a
+// habit better from several examples, and per-session clusters let this
+// category crowd every other one out of the grading queue.
 function detectAgentParallelismCandidates(groupedSessions) {
   const clusters = [];
 
   for (const [groupName, sessions] of groupedSessions) {
+    const serialSessions = [];
+    const trivialDelegationSessions = [];
     for (const session of sessions) {
-      const usesTaskTool = session.turns.some((turn) => turn.toolUses.some((tu) => tu.name === 'Task'));
+      const subagentPrompts = collectSubagentPrompts(session);
       const independentChunks = countIndependentSerialChunks(session);
 
-      if (!usesTaskTool && independentChunks >= MIN_CLUSTER_SIZE) {
-        clusters.push({ group: groupName, signal: 'serial-independent-work', independentChunks, evidenceSessionIds: [session.sessionId] });
+      if (subagentPrompts.length === 0 && independentChunks >= MIN_CLUSTER_SIZE) {
+        serialSessions.push({ sessionId: session.sessionId, independentChunks });
       }
-      if (usesTaskTool && independentChunks === 0) {
-        clusters.push({ group: groupName, signal: 'subagents-for-trivial-work', evidenceSessionIds: [session.sessionId] });
+      if (subagentPrompts.length > 0 && independentChunks === 0 && subagentPrompts.every(isTrivialSubagentPrompt)) {
+        trivialDelegationSessions.push({ sessionId: session.sessionId, independentChunks });
       }
     }
+    if (serialSessions.length > 0) clusters.push(buildAgentCluster(groupName, 'serial-independent-work', serialSessions));
+    if (trivialDelegationSessions.length > 0) clusters.push(buildAgentCluster(groupName, 'subagents-for-trivial-work', trivialDelegationSessions));
   }
 
   return clusters;
+}
+
+function buildAgentCluster(groupName, signal, flaggedSessions) {
+  const ranked = [...flaggedSessions].sort((a, b) => b.independentChunks - a.independentChunks);
+  return {
+    group: groupName,
+    signal,
+    independentChunks: ranked[0].independentChunks,
+    ...cappedEvidence(ranked.map((entry) => entry.sessionId)),
+  };
+}
+
+function collectSubagentPrompts(session) {
+  const prompts = [];
+  for (const turn of session.turns) {
+    for (const toolUse of turn.toolUses) {
+      if (!SUBAGENT_TOOL_NAMES.has(toolUse.name)) continue;
+      const prompt = toolUse.input && typeof toolUse.input.prompt === 'string' ? toolUse.input.prompt : '';
+      prompts.push(prompt);
+    }
+  }
+  return prompts;
+}
+
+function isTrivialSubagentPrompt(prompt) {
+  return prompt.length <= TRIVIAL_SUBAGENT_PROMPT_MAX_CHARS;
 }
 
 function countIndependentSerialChunks(session) {
@@ -697,7 +959,7 @@ function flattenToolCalls(session) {
   const toolCalls = [];
   for (const turn of session.turns) {
     for (const toolUse of turn.toolUses) {
-      toolCalls.push({ name: toolUse.name, target: extractToolTarget(toolUse) });
+      toolCalls.push({ name: toolUse.name, target: extractToolTarget(toolUse), isLookup: isLookupToolUse(toolUse) });
     }
   }
   return toolCalls;
@@ -712,8 +974,14 @@ function extractToolTarget(toolUse) {
   return null;
 }
 
+function isLookupToolUse(toolUse) {
+  if (INDEPENDENT_LOOKUP_TOOL_NAMES.has(toolUse.name)) return true;
+  const command = toolUse.name === 'Bash' && toolUse.input ? toolUse.input.command : null;
+  return typeof command === 'string' && READ_ONLY_BASH_PATTERN.test(command);
+}
+
 function isSameToolDifferentTarget(callA, callB) {
-  return callA.name === callB.name && callA.target !== null && callB.target !== null && callA.target !== callB.target;
+  return callA.isLookup && callB.isLookup && callA.name === callB.name && callA.target !== null && callB.target !== null && callA.target !== callB.target;
 }
 
 // ---------------------------------------------------------------------------
@@ -780,6 +1048,7 @@ function runHeuristicPass({ full = false, repo = null, branch = null } = {}) {
   const allSessions = filterByScope(sinceLastReview, groups, { repo, branch });
 
   const groupedSessions = assignSessionsToGroups(allSessions, groups);
+  const candidates = detectAllCategoryCandidates(groupedSessions);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -792,7 +1061,8 @@ function runHeuristicPass({ full = false, repo = null, branch = null } = {}) {
     filesSkipped: skippedFiles,
     groupsWereAutoGenerated: wasGenerated,
     groupCount: groupedSessions.size,
-    candidates: detectAllCategoryCandidates(groupedSessions),
+    candidates,
+    gradingQueue: buildGradingQueue(candidates),
   };
 }
 
@@ -883,4 +1153,12 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = {
+  classifyHookRequest,
+  followsFileEditTool,
+  isManualWorkTurn,
+  collectUsedMcpServers,
+  countIndependentSerialChunks,
+};
