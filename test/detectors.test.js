@@ -11,6 +11,8 @@ const {
   countIndependentSerialChunks,
   isPersonTypedTurn,
   detectGuidelineCandidates,
+  detectSkillCandidates,
+  detectSessionHygieneCandidates,
   correctionRateSlope,
 } = require('../plugins/loupe/skills/review/scripts/heuristics');
 
@@ -127,4 +129,54 @@ test('correctionRateSlope still sees rising typed corrections', () => {
   const calm = Array.from({ length: 10 }, () => human('next step please'));
   const corrections = Array.from({ length: 10 }, () => human("no, don't do that"));
   assert.equal(correctionRateSlope({ turns: [...calm, human(COMPACTION_SUMMARY), ...corrections] }), 1);
+});
+
+test('detectGuidelineCandidates needs the correction in two or more sessions', () => {
+  const sessions = [
+    { sessionId: 's1', turns: [human("don't use var, use const"), human("don't use var here, use const")] },
+    { sessionId: 's2', turns: [human('next step please')] },
+  ];
+  assert.deepEqual(detectGuidelineCandidates(new Map([['repo', sessions]])), []);
+});
+
+test('detectGuidelineCandidates counts repeated text once per session', () => {
+  const repeated = "don't use var, use const";
+  const sessions = [
+    { sessionId: 's1', turns: [human(repeated), human(repeated), human(repeated)] },
+    { sessionId: 's2', turns: [human(repeated)] },
+  ];
+  const clusters = detectGuidelineCandidates(new Map([['repo', sessions]]));
+  assert.equal(clusters.length, 1);
+  assert.equal(clusters[0].occurrenceCount, 2);
+  assert.deepEqual(clusters[0].evidenceSessionIds, ['s1', 's2']);
+});
+
+test('detectSkillCandidates keeps a sample of evidence and the full count', () => {
+  const sessions = Array.from({ length: 12 }, (_, i) => ({
+    sessionId: `s${i}`,
+    turns: [{ ...assistant(tool('Read', {}), tool('Edit', {}), tool('Bash', {})), timestamp: `2026-01-${String(i + 1).padStart(2, '0')}` }],
+  }));
+  const [cluster] = detectSkillCandidates(new Map([['repo', sessions]]));
+  assert.equal(cluster.evidenceSessionCount, 12);
+  assert.equal(cluster.evidenceSessionIds.length, 8);
+  assert.equal(cluster.evidenceSessionIds[0], 's11', 'most recent first');
+});
+
+function risingSession(sessionId, correctionCount) {
+  const calm = Array.from({ length: 10 }, () => human('next step please'));
+  const late = Array.from({ length: 10 }, (_, i) => human(i < correctionCount ? "no, don't do that" : 'next step please'));
+  return { sessionId, turns: [...calm, ...late] };
+}
+
+test('detectSessionHygieneCandidates ignores a rising correction rate in one session', () => {
+  const clusters = detectSessionHygieneCandidates(new Map([['repo', [risingSession('s1', 8), risingSession('s2', 0)]]]));
+  assert.deepEqual(clusters.filter((c) => c.signal === 'rising-correction-rate'), []);
+});
+
+test('detectSessionHygieneCandidates groups rising sessions, steepest first', () => {
+  const sessions = [risingSession('s1', 3), risingSession('s2', 8), risingSession('s3', 0)];
+  const [cluster] = detectSessionHygieneCandidates(new Map([['repo', sessions]])).filter((c) => c.signal === 'rising-correction-rate');
+  assert.deepEqual(cluster.evidenceSessionIds, ['s2', 's1']);
+  assert.equal(cluster.evidenceSessionCount, 2);
+  assert.equal(cluster.maxSlope, 0.8);
 });
